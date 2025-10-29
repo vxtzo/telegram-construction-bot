@@ -97,6 +97,12 @@ def get_object_card_keyboard(
         )
         builder.row(
             InlineKeyboardButton(
+                text="📄 Посмотреть авансы",
+                callback_data=f"object:view_advances:{object_id}"
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
                 text="📋 Посмотреть расходы",
                 callback_data=f"object:view_expenses:{object_id}"
             )
@@ -113,7 +119,14 @@ def get_object_card_keyboard(
     
     elif status == ObjectStatus.COMPLETED:
         # Кнопки для завершенного объекта
-        
+
+        builder.row(
+            InlineKeyboardButton(
+                text="📄 Посмотреть авансы",
+                callback_data=f"object:view_advances:{object_id}"
+            )
+        )
+
         # Только админ может вернуть объект
         if user_role == UserRole.ADMIN:
             builder.row(

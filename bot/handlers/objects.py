@@ -14,7 +14,8 @@ from database.crud import (
     get_expenses_by_object,
     get_expense_by_id,
     update_compensation_status,
-    get_file_by_id
+    get_file_by_id,
+    get_advances_by_object
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -219,6 +220,69 @@ async def cancel_restore_object(callback: CallbackQuery):
         "❌ Возврат объекта отменён."
     )
     await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("object:view_advances:"))
+async def view_advances_list(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Просмотр списка авансов по объекту"""
+
+    object_id = int(callback.data.split(":")[2])
+
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    advances = await get_advances_by_object(session, object_id)
+
+    if not advances:
+        await callback.message.edit_text(
+            f"📄 <b>Авансы по объекту</b>\n\n"
+            f"🏗️ {obj.name}\n\n"
+            f"Пока нет добавленных авансов.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
+            ])
+        )
+        await callback.answer()
+        return
+
+    from bot.services.calculations import format_currency
+
+    text = f"📄 <b>Авансы по объекту</b>\n\n"
+    text += f"🏗️ {obj.name}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    advances_sorted = sorted(advances, key=lambda a: a.date, reverse=True)
+
+    for advance in advances_sorted[:25]:
+        date_str = advance.date.strftime("%d.%m.%Y")
+        text += (
+            f"\n👤 <b>{advance.worker_name}</b>\n"
+            f"⚒ {advance.work_type}\n"
+            f"💰 {format_currency(advance.amount)}\n"
+            f"📅 {date_str}\n"
+        )
+
+    if len(advances_sorted) > 25:
+        text += f"\n… и ещё {len(advances_sorted) - 25} записей"
+
+    total_decimal = sum(a.amount for a in advances)
+    text += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"Всего авансов: {len(advances)}\n"
+    text += f"Общая сумма: {format_currency(total_decimal)}"
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
+    ])
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("object:view_expenses:"))
