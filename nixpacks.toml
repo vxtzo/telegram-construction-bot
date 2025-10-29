@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["python311", "postgresql"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[phases.build]
+cmds = ["alembic upgrade head || echo 'Migration will run on start'"]
+
+[start]
+cmd = "python -m bot.main"
+

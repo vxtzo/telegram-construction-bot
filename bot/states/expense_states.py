@@ -1,0 +1,29 @@
+"""
+FSM состояния для добавления расходов и авансов
+"""
+from aiogram.fsm.state import State, StatesGroup
+
+
+class AddExpenseStates(StatesGroup):
+    """Состояния для добавления расхода"""
+    
+    waiting_input = State()  # Ожидание текста или голоса
+    confirm_expense = State()  # Подтверждение распарсенных данных
+    waiting_photo = State()  # Ожидание фото чека (опционально)
+
+
+class AddAdvanceStates(StatesGroup):
+    """Состояния для добавления аванса"""
+    
+    waiting_input = State()  # Ожидание текста или голоса
+    confirm_advance = State()  # Подтверждение распарсенных данных
+
+
+class ReportPeriodStates(StatesGroup):
+    """Состояния для выбора периода отчета"""
+    
+    waiting_year = State()
+    waiting_month = State()
+    waiting_date_from = State()
+    waiting_date_to = State()
+
