@@ -18,67 +18,50 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def rename_enum_value(enum_name: str, old_value: str, new_value: str) -> None:
+    """Безопасно переименовывает значение enum, если оно существует."""
+
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM pg_enum e
+                JOIN pg_type t ON e.enumtypid = t.oid
+                WHERE t.typname = '{enum_name}' AND e.enumlabel = '{old_value}'
+            ) THEN
+                ALTER TYPE {enum_name} RENAME VALUE '{old_value}' TO '{new_value}';
+            END IF;
+        END
+        $$;
+        """
+    )
+
+
 def upgrade() -> None:
-    """Приводим существующие значения к верхнему регистру и пересоздаем enum."""
+    """Переименовываем значения enum в верхний регистр."""
 
-    # Преобразуем колонки к text, чтобы можно было безопасно обновлять enum
-    op.execute("ALTER TABLE expenses ALTER COLUMN payment_source TYPE text USING payment_source::text")
-    op.execute("ALTER TABLE expenses ALTER COLUMN compensation_status TYPE text USING compensation_status::text")
+    # Переименовываем значения payment_source
+    rename_enum_value('paymentsource', 'company', 'COMPANY')
+    rename_enum_value('paymentsource', 'personal', 'PERSONAL')
 
-    # Удаляем старые enum типы, если они есть
-    op.execute("DROP TYPE IF EXISTS paymentsource CASCADE")
-    op.execute("DROP TYPE IF EXISTS compensationstatus CASCADE")
+    # Переименовываем значения compensation_status
+    rename_enum_value('compensationstatus', 'pending', 'PENDING')
+    rename_enum_value('compensationstatus', 'compensated', 'COMPENSATED')
 
-    # Создаем новые enum типы с верхним регистром
-    op.execute("CREATE TYPE paymentsource AS ENUM ('COMPANY', 'PERSONAL')")
-    op.execute("CREATE TYPE compensationstatus AS ENUM ('PENDING', 'COMPENSATED')")
-
-    # Обновляем существующие значения, если они в нижнем регистре
-    op.execute("UPDATE expenses SET payment_source = UPPER(payment_source) WHERE payment_source IS NOT NULL")
-    op.execute("UPDATE expenses SET compensation_status = UPPER(compensation_status) WHERE compensation_status IS NOT NULL")
-
-    # Приводим колонки обратно к enum типу
-    op.execute(
-        "ALTER TABLE expenses ALTER COLUMN payment_source TYPE paymentsource USING payment_source::paymentsource"
-    )
-    op.execute(
-        "ALTER TABLE expenses ALTER COLUMN compensation_status TYPE compensationstatus USING compensation_status::compensationstatus"
-    )
-
-    # Устанавливаем значение по умолчанию
+    # Обновляем значение по умолчанию
     op.execute("ALTER TABLE expenses ALTER COLUMN payment_source SET DEFAULT 'COMPANY'")
 
 
 def downgrade() -> None:
-    """Возвращаем enum значения в нижний регистр."""
-
-    op.execute("ALTER TABLE expenses ALTER COLUMN payment_source DROP DEFAULT")
-
-    # Преобразуем в text перед пересозданием enum
-    op.execute("ALTER TABLE expenses ALTER COLUMN payment_source TYPE text USING payment_source::text")
-    op.execute("ALTER TABLE expenses ALTER COLUMN compensation_status TYPE text USING compensation_status::text")
-
-    # Удаляем текущие enum типы
-    op.execute("DROP TYPE IF EXISTS paymentsource CASCADE")
-    op.execute("DROP TYPE IF EXISTS compensationstatus CASCADE")
-
-    # Создаем enum с нижним регистром
-    op.execute("CREATE TYPE paymentsource AS ENUM ('company', 'personal')")
-    op.execute("CREATE TYPE compensationstatus AS ENUM ('pending', 'compensated')")
-
-    # Преобразуем значения обратно в нижний регистр
-    op.execute("UPDATE expenses SET payment_source = LOWER(payment_source) WHERE payment_source IS NOT NULL")
-    op.execute(
-        "UPDATE expenses SET compensation_status = LOWER(compensation_status) WHERE compensation_status IS NOT NULL"
-    )
-
-    # Возвращаем типы колонкам
-    op.execute(
-        "ALTER TABLE expenses ALTER COLUMN payment_source TYPE paymentsource USING payment_source::paymentsource"
-    )
-    op.execute(
-        "ALTER TABLE expenses ALTER COLUMN compensation_status TYPE compensationstatus USING compensation_status::compensationstatus"
-    )
+    """Возвращаем значения enum в нижний регистр."""
 
     op.execute("ALTER TABLE expenses ALTER COLUMN payment_source SET DEFAULT 'company'")
+
+    rename_enum_value('paymentsource', 'COMPANY', 'company')
+    rename_enum_value('paymentsource', 'PERSONAL', 'personal')
+
+    rename_enum_value('compensationstatus', 'PENDING', 'pending')
+    rename_enum_value('compensationstatus', 'COMPENSATED', 'compensated')
 
