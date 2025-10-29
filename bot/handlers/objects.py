@@ -2,7 +2,7 @@
 Обработчики для просмотра объектов
 """
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,10 +11,10 @@ from database.crud import (
     get_objects_by_status,
     get_object_by_id,
     update_object_status,
-    get_files_by_object,
     get_expenses_by_object,
     get_expense_by_id,
-    update_compensation_status
+    update_compensation_status,
+    get_file_by_id
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -221,127 +221,6 @@ async def cancel_restore_object(callback: CallbackQuery):
     await callback.answer("Отменено")
 
 
-@router.callback_query(F.data.startswith("object:view_receipts:"))
-async def view_receipts(callback: CallbackQuery, session: AsyncSession):
-    """
-    Показать чеки и накладные объекта
-    """
-    await callback.answer()
-    
-    object_id = int(callback.data.split(":")[2])
-    
-    # Получаем объект
-    obj = await get_object_by_id(session, object_id, load_relations=False)
-    
-    if not obj:
-        await callback.message.answer("❌ Объект не найден")
-        return
-    
-    # Получаем все файлы объекта
-    from database.models import FileType
-    files = await get_files_by_object(session, object_id)
-    
-    # Фильтруем чеки
-    receipts = [f for f in files if f.file_type == FileType.RECEIPT]
-    
-    if not receipts:
-        await callback.message.edit_text(
-            f"📸 <b>Чеки объекта: {obj.name}</b>\n\n"
-            f"❌ Нет загруженных чеков\n\n"
-            f"Чеки добавляются автоматически при добавлении расходов с фото.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-            ])
-        )
-        return
-    
-    # Формируем сообщение со списком чеков
-    text = f"📸 <b>Чеки объекта: {obj.name}</b>\n\n"
-    text += f"Всего чеков: {len(receipts)}\n\n"
-    
-    for i, receipt in enumerate(receipts[:10], 1):  # Показываем первые 10
-        date_str = receipt.uploaded_at.strftime("%d.%m.%Y %H:%M")
-        size_kb = (receipt.file_size or 0) // 1024
-        text += f"{i}. {receipt.filename or 'Чек'} ({size_kb} КБ)\n"
-        text += f"   📅 {date_str}\n\n"
-    
-    if len(receipts) > 10:
-        text += f"... и ещё {len(receipts) - 10} чеков\n\n"
-    
-    text += "💡 Чтобы посмотреть чек, нажмите на кнопку ниже:"
-    
-    # Создаём клавиатуру с кнопками чеков
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    builder = InlineKeyboardBuilder()
-    
-    # Добавляем кнопки для первых 5 чеков
-    for i, receipt in enumerate(receipts[:5], 1):
-        builder.row(
-            InlineKeyboardButton(
-                text=f"📷 Чек #{i}",
-                callback_data=f"receipt:view:{receipt.id}"
-            )
-        )
-    
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")
-    )
-    
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
-
-
-@router.callback_query(F.data.startswith("receipt:view:"))
-async def view_single_receipt(callback: CallbackQuery, session: AsyncSession):
-    """
-    Показать конкретный чек
-    """
-    await callback.answer()
-    
-    file_id = int(callback.data.split(":")[2])
-    
-    # Получаем файл из БД
-    from database.crud import get_file_by_id
-    from aiogram.types import BufferedInputFile
-    
-    file = await get_file_by_id(session, file_id)
-    
-    if not file or not file.file_data:
-        await callback.message.answer("❌ Чек не найден или был удалён")
-        return
-    
-    # Отправляем фото
-    try:
-        photo = BufferedInputFile(
-            file.file_data,
-            filename=file.filename or "receipt.jpg"
-        )
-        
-        caption = f"📸 <b>{file.filename or 'Чек'}</b>\n\n"
-        caption += f"📅 Загружен: {file.uploaded_at.strftime('%d.%m.%Y %H:%M')}\n"
-        caption += f"📦 Размер: {(file.file_size or 0) // 1024} КБ"
-        
-        await callback.message.answer_photo(
-            photo=photo,
-            caption=caption,
-            parse_mode="HTML"
-        )
-        
-        await callback.message.answer(
-            "👆 Чек отправлен выше",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 К списку чеков", callback_data=f"object:view_receipts:{file.object_id}")]
-            ])
-        )
-        
-    except Exception as e:
-        await callback.message.answer(f"❌ Ошибка отправки чека: {str(e)}")
-
-
 @router.callback_query(F.data.startswith("object:view_expenses:"))
 async def view_expenses_list(callback: CallbackQuery, user: User, session: AsyncSession):
     """Просмотр списка расходов объекта"""
@@ -406,16 +285,20 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
                 else:
                     status_icon = "💳"  # Оплачено фирмой
                     status_text = "Оплачено с карты ИП"
-                
+
+                has_receipt = bool(exp.photo_url and exp.photo_url.startswith("file_"))
+                receipt_note = " • 📎 Чек прикреплен" if has_receipt else ""
+                button_receipt_icon = " 📎" if has_receipt else ""
+
                 date_str = exp.date.strftime("%d.%m")
                 text += f"\n{status_icon} {date_str} • {format_currency(exp.amount)}\n"
                 text += f"   {exp.description[:50]}\n"
-                text += f"   <i>{status_text}</i>\n"
-                
+                text += f"   <i>{status_text}{receipt_note}</i>\n"
+
                 # Добавляем кнопку для детального просмотра
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"{status_icon} {date_str} - {format_currency(exp.amount)}",
+                        text=f"{status_icon}{button_receipt_icon} {date_str} - {format_currency(exp.amount)}",
                         callback_data=f"expense:detail:{exp.id}"
                     )
                 ])
@@ -470,6 +353,8 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
         status_text = "Оплачено с карты ИП"
         can_compensate = False
     
+    has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
+
     text = f"{status_icon} <b>Детали расхода</b>\n\n"
     text += f"Тип: {type_names.get(expense.type, expense.type)}\n"
     text += f"💰 Сумма: {format_currency(expense.amount)}\n"
@@ -477,10 +362,12 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
     text += f"📝 Описание: {expense.description}\n"
     text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"Статус: <b>{status_text}</b>\n"
-    
+    if has_receipt:
+        text += "📎 Чек прикреплён — см. сообщение ниже\n"
+ 
     # Кнопки
     buttons = []
-    
+ 
     # Если к компенсации и пользователь админ - добавляем кнопку компенсации
     if can_compensate:
         buttons.append([
@@ -489,7 +376,7 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
                 callback_data=f"expense:compensate:{expense_id}"
             )
         ])
-    
+ 
     # Кнопка назад
     buttons.append([
         InlineKeyboardButton(
@@ -497,12 +384,41 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
             callback_data=f"object:view_expenses:{expense.object_id}"
         )
     ])
-    
+ 
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+
+    if has_receipt:
+        receipt_id = None
+        try:
+            receipt_id = int(expense.photo_url.split("_", 1)[1])
+        except (ValueError, IndexError):
+            receipt_id = None
+
+        if receipt_id:
+            receipt_file = await get_file_by_id(session, receipt_id)
+            if receipt_file and receipt_file.file_data:
+                size_kb = (receipt_file.file_size or 0) // 1024
+                caption = (
+                    f"📎 <b>Чек по расходу</b>\n"
+                    f"📅 Загружен: {receipt_file.uploaded_at.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"📦 Размер: {size_kb} КБ"
+                )
+                photo = BufferedInputFile(
+                    receipt_file.file_data,
+                    filename=receipt_file.filename or "receipt.jpg"
+                )
+                await callback.message.answer_photo(
+                    photo=photo,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.message.answer("⚠️ Чек был прикреплён, но не найден в базе данных")
+
     await callback.answer()
 
 

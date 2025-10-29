@@ -101,12 +101,6 @@ def get_object_card_keyboard(
                 callback_data=f"object:view_expenses:{object_id}"
             )
         )
-        builder.row(
-            InlineKeyboardButton(
-                text="📸 Посмотреть чеки",
-                callback_data=f"object:view_receipts:{object_id}"
-            )
-        )
         
         # Только админ может завершать объекты
         if user_role == UserRole.ADMIN:
