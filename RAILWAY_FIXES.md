@@ -141,6 +141,8 @@ worker: alembic upgrade head && python -m bot.main
 3. `Fix: Remove sensitive API keys from documentation files` - удаление секретов
 4. `Fix: Resolve pydantic version conflict with aiogram` - исправление pydantic
 5. `Fix: Use asyncpg driver in Alembic migrations` - исправление драйвера БД
+6. `Fix: Update OpenAI version and replace Google Drive with PostgreSQL file storage` - обновление OpenAI и замена хранилища
+7. `Fix: Remove all Google Drive references and implement PostgreSQL file storage` - полное удаление Google Drive
 
 ---
 
