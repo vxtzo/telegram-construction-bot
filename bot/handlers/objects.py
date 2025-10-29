@@ -70,8 +70,8 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
         await callback.answer("❌ Объект не найден", show_alert=True)
         return
     
-    # Получаем файлы
-    files = await get_files_by_object(session, object_id)
+    # Получаем файлы из объекта (relation подгружена при load_relations=True)
+    files = getattr(obj, "files", []) or []
     
     # Генерируем отчет
     report_text = generate_object_report(obj, files)
