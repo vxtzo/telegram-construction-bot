@@ -6,7 +6,7 @@ import tempfile
 from datetime import datetime
 from decimal import Decimal
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,32 @@ router = Router()
 
 
 # ============ РАСХОДЫ ============
+
+@router.callback_query(F.data.startswith("expense:add_menu:"))
+async def show_expense_type_menu(callback: CallbackQuery, session: AsyncSession):
+    """Показать меню выбора типа расхода"""
+
+    object_id = int(callback.data.split(":")[2])
+
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧰 Расходники", callback_data=f"expense:add:supplies:{object_id}")],
+        [InlineKeyboardButton(text="🚚 Транспорт", callback_data=f"expense:add:transport:{object_id}")],
+        [InlineKeyboardButton(text="🧾 Накладные", callback_data=f"expense:add:overhead:{object_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
+    ])
+
+    await callback.message.answer(
+        f"Выберите тип расхода для объекта <b>{obj.name}</b>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
 
 @router.callback_query(F.data.startswith("expense:add:"))
 async def start_add_expense(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -224,30 +250,29 @@ async def confirm_expense(callback: CallbackQuery, user: User, state: FSMContext
     """Подтверждение расхода - выбор источника оплаты"""
     
     data = await state.get_data()
-    payment_source_ai = data.get('parsed_payment_source', 'COMPANY').upper()
+    payment_source_ai = data.get('parsed_payment_source', 'company')
     
     await state.set_state(AddExpenseStates.select_payment_source)
     
     # Создаем клавиатуру для выбора источника оплаты
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="💳 Оплачено фирмой",
-            callback_data="payment:COMPANY"
+            callback_data="payment:company"
         )],
         [InlineKeyboardButton(
             text="💰 Оплачено прорабом (к компенсации)",
-            callback_data="payment:PERSONAL"
+            callback_data="payment:personal"
         )],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
     
     # Подсказываем что AI определил
     ai_hint = ""
-    if payment_source_ai == "PERSONAL":
+    if payment_source_ai == "personal":
         ai_hint = "\n\n💡 <i>Похоже, это оплата прорабом</i>"
-    elif payment_source_ai == "COMPANY":
+    elif payment_source_ai == "company":
         ai_hint = "\n\n💡 <i>Похоже, это оплата фирмой</i>"
     
     await callback.message.edit_text(
@@ -269,7 +294,6 @@ async def select_payment_source(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AddExpenseStates.waiting_photo)
     
     # Предлагаем добавить фото
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Пропустить", callback_data="expense:skip_photo")],
@@ -321,8 +345,8 @@ async def process_expense_photo(message: Message, user: User, session: AsyncSess
         print(f"⚠️ Не удалось сохранить фото: {e}")
     
     # Определяем источник оплаты и статус компенсации
-    payment_source_str = data.get('selected_payment_source', 'COMPANY').upper()
-    payment_source = PaymentSource.COMPANY if payment_source_str == 'COMPANY' else PaymentSource.PERSONAL
+    payment_source_str = data.get('selected_payment_source', 'company')
+    payment_source = PaymentSource.COMPANY if payment_source_str == 'company' else PaymentSource.PERSONAL
     compensation_status = CompensationStatus.PENDING if payment_source == PaymentSource.PERSONAL else None
     
     # Создаем расход
@@ -362,8 +386,8 @@ async def skip_expense_photo(callback: CallbackQuery, user: User, session: Async
     date_obj = datetime.strptime(data['parsed_date'], "%Y-%m-%d")
     
     # Определяем источник оплаты и статус компенсации
-    payment_source_str = data.get('selected_payment_source', 'COMPANY').upper()
-    payment_source = PaymentSource.COMPANY if payment_source_str == 'COMPANY' else PaymentSource.PERSONAL
+    payment_source_str = data.get('selected_payment_source', 'company')
+    payment_source = PaymentSource.COMPANY if payment_source_str == 'company' else PaymentSource.PERSONAL
     compensation_status = CompensationStatus.PENDING if payment_source == PaymentSource.PERSONAL else None
     
     expense = await create_expense(

@@ -79,14 +79,8 @@ def get_object_card_keyboard(
         # Все могут добавлять расходы и авансы
         builder.row(
             InlineKeyboardButton(
-                text="➕ Добавить расходники",
-                callback_data=f"expense:add:supplies:{object_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text="🚚 Добавить транспортные",
-                callback_data=f"expense:add:transport:{object_id}"
+                text="➕ Добавить расход",
+                callback_data=f"expense:add_menu:{object_id}"
             )
         )
         builder.row(

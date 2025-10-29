@@ -31,7 +31,7 @@ async def start_add_object(message: Message, user: User, state: FSMContext):
     
     await message.answer(
         "📝 <b>Создание нового объекта</b>\n\n"
-        "Шаг 1/11: Введите название объекта\n\n"
+        "Шаг 1/12: Введите название объекта\n\n"
         "Например: <i>Вячеслав С поворотом</i>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -46,7 +46,7 @@ async def process_name(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_address)
     
     await message.answer(
-        "📝 Шаг 2/11: Введите адрес объекта\n\n"
+        "📝 Шаг 2/12: Введите адрес объекта\n\n"
         "Или нажмите 'Пропустить', если адрес неизвестен",
         reply_markup=get_skip_or_cancel()
     )
@@ -60,7 +60,7 @@ async def process_address(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_foreman)
     
     await message.answer(
-        "📝 Шаг 3/11: Введите имя бригадира/ответственного\n\n"
+        "📝 Шаг 3/12: Введите имя бригадира/ответственного\n\n"
         "Или нажмите 'Пропустить'",
         reply_markup=get_skip_or_cancel()
     )
@@ -74,7 +74,7 @@ async def process_foreman(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_dates)
     
     await message.answer(
-        "📝 Шаг 4/11: Введите даты работ\n\n"
+        "📝 Шаг 4/12: Введите даты работ\n\n"
         "Формат: <code>ДД.ММ.ГГГГ - ДД.ММ.ГГГГ</code>\n"
         "Например: <code>01.11.2025 - 30.11.2025</code>\n\n"
         "Или нажмите 'Пропустить'",
@@ -108,7 +108,7 @@ async def process_dates(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_prepayment)
     
     await message.answer(
-        "💸 Шаг 5/11: Введите сумму предоплаты (в рублях)\n\n"
+        "💸 Шаг 5/12: Введите сумму предоплаты (в рублях)\n\n"
         "Например: <code>150000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -133,7 +133,7 @@ async def process_prepayment(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_final_payment)
     
     await message.answer(
-        "💸 Шаг 6/11: Введите сумму окончательной оплаты (в рублях)\n\n"
+        "💸 Шаг 6/12: Введите сумму окончательной оплаты (в рублях)\n\n"
         "Например: <code>350000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -158,7 +158,7 @@ async def process_final_payment(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_estimate_s3)
     
     await message.answer(
-        "🧱 Шаг 7/11: Введите сумму С3 по смете (в рублях)\n\n"
+        "🧱 Шаг 7/12: Введите сумму С3 по смете (в рублях)\n\n"
         "Например: <code>200000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -180,10 +180,35 @@ async def process_estimate_s3(message: Message, state: FSMContext):
         return
     
     await state.update_data(estimate_s3=estimate_s3)
-    await state.set_state(AddObjectStates.enter_estimate_works)
+    await state.set_state(AddObjectStates.enter_actual_s3_discount)
     
     await message.answer(
-        "⚒ Шаг 8/11: Введите сумму работ по смете (в рублях)\n\n"
+        "🧱 Шаг 8/12: Введите сумму С3 со скидкой (фактическая стоимость) в рублях\n\n"
+        "Например: <code>180000</code>",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button()
+    )
+
+
+@router.message(AddObjectStates.enter_actual_s3_discount)
+async def process_actual_s3_discount(message: Message, state: FSMContext):
+    """Обработка фактической стоимости С3 со скидкой"""
+
+    try:
+        actual_s3_discount = Decimal(message.text.strip().replace(" ", "").replace(",", "."))
+        if actual_s3_discount < 0:
+            raise ValueError
+    except:
+        await message.answer(
+            "❌ Неверная сумма. Введите число:"
+        )
+        return
+
+    await state.update_data(actual_s3_discount=actual_s3_discount)
+    await state.set_state(AddObjectStates.enter_estimate_works)
+
+    await message.answer(
+        "⚒ Шаг 9/12: Введите сумму работ по смете (в рублях)\n\n"
         "Например: <code>150000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -208,7 +233,7 @@ async def process_estimate_works(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_estimate_supplies)
     
     await message.answer(
-        "🧰 Шаг 9/11: Введите сумму расходников по смете (в рублях)\n\n"
+        "🧰 Шаг 10/12: Введите сумму расходников по смете (в рублях)\n\n"
         "Например: <code>50000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -233,7 +258,7 @@ async def process_estimate_supplies(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_estimate_overhead)
     
     await message.answer(
-        "💰 Шаг 10/11: Введите сумму накладных расходов по смете (в рублях)\n\n"
+        "💰 Шаг 11/12: Введите сумму накладных расходов по смете (в рублях)\n\n"
         "Например: <code>30000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -258,7 +283,7 @@ async def process_estimate_overhead(message: Message, state: FSMContext):
     await state.set_state(AddObjectStates.enter_estimate_transport)
     
     await message.answer(
-        "🚚 Шаг 11/11: Введите сумму транспортных расходов по смете (в рублях)\n\n"
+        "🚚 Шаг 12/12: Введите сумму транспортных расходов по смете (в рублях)\n\n"
         "Например: <code>40000</code>",
         parse_mode="HTML",
         reply_markup=get_cancel_button()
@@ -291,6 +316,8 @@ async def process_estimate_transport(message: Message, state: FSMContext):
     start_date_str = data['start_date'].strftime("%d.%m.%Y") if data.get('start_date') else "—"
     end_date_str = data['end_date'].strftime("%d.%m.%Y") if data.get('end_date') else "—"
     total_income = data['prepayment'] + data['final_payment']
+    actual_s3_discount = data['actual_s3_discount']
+    s3_difference = data['estimate_s3'] - actual_s3_discount
     
     summary = f"""
 ✅ <b>Проверка данных объекта</b>
@@ -307,6 +334,8 @@ async def process_estimate_transport(message: Message, state: FSMContext):
 
 📊 <b>Смета:</b>
 🧱 С3: {format_currency(data['estimate_s3'])}
+🧱 С3 со скидкой: {format_currency(actual_s3_discount)}
+🔻 Разница С3: {format_currency(s3_difference)}
 ⚒ Работы: {format_currency(data['estimate_works'])}
 🧰 Расходники: {format_currency(data['estimate_supplies'])}
 💰 Накладные: {format_currency(data['estimate_overhead'])}
@@ -344,7 +373,8 @@ async def save_object(callback: CallbackQuery, user: User, session: AsyncSession
             estimate_works=data['estimate_works'],
             estimate_supplies=data['estimate_supplies'],
             estimate_overhead=data['estimate_overhead'],
-            estimate_transport=data['estimate_transport']
+            estimate_transport=data['estimate_transport'],
+            actual_s3_discount=data['actual_s3_discount']
         )
         
         await state.clear()
@@ -374,7 +404,7 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
         await state.update_data(address=None)
         await state.set_state(AddObjectStates.enter_foreman)
         await callback.message.edit_text(
-            "📝 Шаг 3/11: Введите имя бригадира/ответственного\n\n"
+            "📝 Шаг 3/12: Введите имя бригадира/ответственного\n\n"
             "Или нажмите 'Пропустить'",
             reply_markup=get_skip_or_cancel()
         )
@@ -383,7 +413,7 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
         await state.update_data(foreman_name=None)
         await state.set_state(AddObjectStates.enter_dates)
         await callback.message.edit_text(
-            "📝 Шаг 4/11: Введите даты работ\n\n"
+            "📝 Шаг 4/12: Введите даты работ\n\n"
             "Формат: <code>ДД.ММ.ГГГГ - ДД.ММ.ГГГГ</code>\n"
             "Например: <code>01.11.2025 - 30.11.2025</code>\n\n"
             "Или нажмите 'Пропустить'",
@@ -395,7 +425,7 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
         await state.update_data(start_date=None, end_date=None)
         await state.set_state(AddObjectStates.enter_prepayment)
         await callback.message.edit_text(
-            "💸 Шаг 5/11: Введите сумму предоплаты (в рублях)\n\n"
+            "💸 Шаг 5/12: Введите сумму предоплаты (в рублях)\n\n"
             "Например: <code>150000</code>",
             parse_mode="HTML",
             reply_markup=get_cancel_button()

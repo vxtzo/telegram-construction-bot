@@ -19,6 +19,7 @@ class AddObjectStates(StatesGroup):
     
     # Смета
     enter_estimate_s3 = State()
+    enter_actual_s3_discount = State()
     enter_estimate_works = State()
     enter_estimate_supplies = State()
     enter_estimate_overhead = State()
