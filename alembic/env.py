@@ -18,8 +18,15 @@ from bot.config import config as app_config
 # access to the values within the .ini file in use.
 config = context.config
 
+# Преобразуем DATABASE_URL для async работы (asyncpg)
+database_url = app_config.DATABASE_URL
+if database_url.startswith("postgresql://"):
+    database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
 # Устанавливаем DATABASE_URL из конфигурации приложения
-config.set_main_option("sqlalchemy.url", app_config.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
