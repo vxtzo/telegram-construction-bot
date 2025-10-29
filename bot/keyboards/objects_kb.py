@@ -91,14 +91,14 @@ def get_object_card_keyboard(
         )
         builder.row(
             InlineKeyboardButton(
-                text="🧾 Добавить накладные",
-                callback_data=f"expense:add:overhead:{object_id}"
+                text="💵 Добавить аванс",
+                callback_data=f"advance:add:{object_id}"
             )
         )
         builder.row(
             InlineKeyboardButton(
-                text="💵 Добавить аванс",
-                callback_data=f"advance:add:{object_id}"
+                text="📸 Посмотреть чеки",
+                callback_data=f"object:view_receipts:{object_id}"
             )
         )
         

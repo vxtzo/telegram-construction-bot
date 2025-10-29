@@ -2,7 +2,7 @@
 Обработчики для просмотра объектов
 """
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -117,9 +117,10 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
     """
     Завершить объект
     """
+    await callback.answer()  # Сразу отвечаем, чтобы убрать индикатор загрузки
     
     if user.role != UserRole.ADMIN:
-        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        await callback.message.answer("❌ Недостаточно прав")
         return
     
     object_id = int(callback.data.split(":")[3])
@@ -128,7 +129,7 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
     obj = await update_object_status(session, object_id, ObjectStatus.COMPLETED)
     
     if not obj:
-        await callback.answer("❌ Ошибка завершения объекта", show_alert=True)
+        await callback.message.answer("❌ Ошибка завершения объекта")
         return
     
     await callback.message.edit_text(
@@ -136,7 +137,6 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
         f"Объект <b>{obj.name}</b> успешно перемещен в раздел 'Завершённые объекты'.",
         parse_mode="HTML"
     )
-    await callback.answer("✅ Объект завершен")
 
 
 @router.callback_query(F.data == "object:complete:cancel")
@@ -216,4 +216,125 @@ async def cancel_restore_object(callback: CallbackQuery):
         "❌ Возврат объекта отменён."
     )
     await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("object:view_receipts:"))
+async def view_receipts(callback: CallbackQuery, session: AsyncSession):
+    """
+    Показать чеки и накладные объекта
+    """
+    await callback.answer()
+    
+    object_id = int(callback.data.split(":")[2])
+    
+    # Получаем объект
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    
+    if not obj:
+        await callback.message.answer("❌ Объект не найден")
+        return
+    
+    # Получаем все файлы объекта
+    from database.models import FileType
+    files = await get_files_by_object(session, object_id)
+    
+    # Фильтруем чеки
+    receipts = [f for f in files if f.file_type == FileType.RECEIPT]
+    
+    if not receipts:
+        await callback.message.edit_text(
+            f"📸 <b>Чеки объекта: {obj.name}</b>\n\n"
+            f"❌ Нет загруженных чеков\n\n"
+            f"Чеки добавляются автоматически при добавлении расходов с фото.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
+            ])
+        )
+        return
+    
+    # Формируем сообщение со списком чеков
+    text = f"📸 <b>Чеки объекта: {obj.name}</b>\n\n"
+    text += f"Всего чеков: {len(receipts)}\n\n"
+    
+    for i, receipt in enumerate(receipts[:10], 1):  # Показываем первые 10
+        date_str = receipt.uploaded_at.strftime("%d.%m.%Y %H:%M")
+        size_kb = (receipt.file_size or 0) // 1024
+        text += f"{i}. {receipt.filename or 'Чек'} ({size_kb} КБ)\n"
+        text += f"   📅 {date_str}\n\n"
+    
+    if len(receipts) > 10:
+        text += f"... и ещё {len(receipts) - 10} чеков\n\n"
+    
+    text += "💡 Чтобы посмотреть чек, нажмите на кнопку ниже:"
+    
+    # Создаём клавиатуру с кнопками чеков
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    
+    # Добавляем кнопки для первых 5 чеков
+    for i, receipt in enumerate(receipts[:5], 1):
+        builder.row(
+            InlineKeyboardButton(
+                text=f"📷 Чек #{i}",
+                callback_data=f"receipt:view:{receipt.id}"
+            )
+        )
+    
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")
+    )
+    
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("receipt:view:"))
+async def view_single_receipt(callback: CallbackQuery, session: AsyncSession):
+    """
+    Показать конкретный чек
+    """
+    await callback.answer()
+    
+    file_id = int(callback.data.split(":")[2])
+    
+    # Получаем файл из БД
+    from database.crud import get_file_by_id
+    from aiogram.types import BufferedInputFile
+    
+    file = await get_file_by_id(session, file_id)
+    
+    if not file or not file.file_data:
+        await callback.message.answer("❌ Чек не найден или был удалён")
+        return
+    
+    # Отправляем фото
+    try:
+        photo = BufferedInputFile(
+            file.file_data,
+            filename=file.filename or "receipt.jpg"
+        )
+        
+        caption = f"📸 <b>{file.filename or 'Чек'}</b>\n\n"
+        caption += f"📅 Загружен: {file.uploaded_at.strftime('%d.%m.%Y %H:%M')}\n"
+        caption += f"📦 Размер: {(file.file_size or 0) // 1024} КБ"
+        
+        await callback.message.answer_photo(
+            photo=photo,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        
+        await callback.message.answer(
+            "👆 Чек отправлен выше",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 К списку чеков", callback_data=f"object:view_receipts:{file.object_id}")]
+            ])
+        )
+        
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка отправки чека: {str(e)}")
 
