@@ -25,7 +25,6 @@ from bot.services.ai_parser import (
     parse_voice_expense,
     parse_voice_advance
 )
-from bot.services.gdrive_service import gdrive_service
 from bot.services.calculations import format_currency
 
 router = Router()
@@ -245,44 +244,25 @@ async def process_expense_photo(message: Message, user: User, session: AsyncSess
     
     photo_url = None
     
-    # Загружаем на Google Drive (если настроено)
-    if gdrive_service.service:
-        try:
-            # Получаем объект для folder_id
-            obj = await get_object_by_id(session, data['object_id'], load_relations=False)
+    # Сохраняем фото в PostgreSQL
+    try:
+        from bot.services.file_service import FileService
+        file_service = FileService(message.bot)
+        
+        # Сохраняем фото в БД
+        saved_file = await file_service.save_photo(
+            session=session,
+            photo=photo,
+            object_id=data['object_id'],
+            file_type=FileType.RECEIPT
+        )
+        
+        if saved_file:
+            photo_url = f"file_{saved_file.id}"  # Храним ID файла в БД
+            print(f"✅ Фото чека сохранено (ID: {saved_file.id})")
             
-            if obj and obj.gdrive_folder_id:
-                # Скачиваем фото
-                file = await message.bot.get_file(photo.file_id)
-                photo_bytes = await message.bot.download_file(file.file_path)
-                
-                # Генерируем имя файла
-                filename = f"receipt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                
-                # Загружаем на Google Drive (в подпапку Чеки)
-                # TODO: получить receipts_folder_id
-                result = gdrive_service.upload_file(
-                    photo_bytes.read(),
-                    filename,
-                    obj.gdrive_folder_id,  # Загружаем в главную папку объекта
-                    'image/jpeg'
-                )
-                
-                if result:
-                    photo_url = result[1]
-                    
-                    # Сохраняем в БД файл
-                    await create_file(
-                        session,
-                        object_id=data['object_id'],
-                        file_type=FileType.RECEIPT,
-                        telegram_file_id=photo.file_id,
-                        gdrive_file_id=result[0],
-                        gdrive_url=result[1],
-                        filename=filename
-                    )
-        except Exception as e:
-            print(f"⚠️ Не удалось загрузить фото на Google Drive: {e}")
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить фото: {e}")
     
     # Создаем расход
     expense = await create_expense(

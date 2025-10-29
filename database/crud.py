@@ -176,22 +176,6 @@ async def update_object_status(
     return result.scalar_one_or_none()
 
 
-async def update_object_gdrive_folder(
-    session: AsyncSession,
-    object_id: int,
-    folder_id: str
-) -> Optional[ConstructionObject]:
-    """Обновить Google Drive folder ID объекта"""
-    result = await session.execute(
-        update(ConstructionObject)
-        .where(ConstructionObject.id == object_id)
-        .values(gdrive_folder_id=folder_id)
-        .returning(ConstructionObject)
-    )
-    await session.commit()
-    return result.scalar_one_or_none()
-
-
 async def update_object_s3_discount(
     session: AsyncSession,
     object_id: int,

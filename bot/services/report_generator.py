@@ -93,10 +93,6 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
             report += f"🧾 Чеки: {len(receipts)} шт.\n"
         if docs:
             report += f"📄 Документы: {len(docs)} шт.\n"
-        
-        # Добавляем ссылку на папку Google Drive, если есть
-        if obj.gdrive_folder_id:
-            report += f"\n📁 Файлы на Google Drive: https://drive.google.com/drive/folders/{obj.gdrive_folder_id}\n"
     
     return report.strip()
 

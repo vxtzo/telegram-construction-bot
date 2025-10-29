@@ -13,7 +13,6 @@ from database.models import User, UserRole
 from database.crud import create_object
 from bot.states.add_object_states import AddObjectStates
 from bot.keyboards.main_menu import get_cancel_button, get_skip_or_cancel, get_confirm_keyboard
-from bot.services.gdrive_service import gdrive_service
 
 router = Router()
 
@@ -347,16 +346,6 @@ async def save_object(callback: CallbackQuery, user: User, session: AsyncSession
             estimate_overhead=data['estimate_overhead'],
             estimate_transport=data['estimate_transport']
         )
-        
-        # Создаем папки на Google Drive (если настроено)
-        if gdrive_service.service:
-            try:
-                folders = gdrive_service.create_object_folders(obj.name)
-                if folders:
-                    from database.crud import update_object_gdrive_folder
-                    await update_object_gdrive_folder(session, obj.id, folders[0])
-            except Exception as e:
-                print(f"⚠️ Не удалось создать папки на Google Drive: {e}")
         
         await state.clear()
         
