@@ -6,12 +6,15 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, ObjectStatus, UserRole
+from database.models import User, ObjectStatus, UserRole, PaymentSource, CompensationStatus, ExpenseType
 from database.crud import (
     get_objects_by_status,
     get_object_by_id,
     update_object_status,
-    get_files_by_object
+    get_files_by_object,
+    get_expenses_by_object,
+    get_expense_by_id,
+    update_compensation_status
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -337,4 +340,191 @@ async def view_single_receipt(callback: CallbackQuery, session: AsyncSession):
         
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка отправки чека: {str(e)}")
+
+
+@router.callback_query(F.data.startswith("object:view_expenses:"))
+async def view_expenses_list(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Просмотр списка расходов объекта"""
+    
+    object_id = int(callback.data.split(":")[2])
+    
+    # Получаем объект
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+    
+    # Получаем расходы
+    expenses = await get_expenses_by_object(session, object_id)
+    
+    if not expenses:
+        await callback.message.edit_text(
+            f"📋 <b>Расходы объекта</b>\n\n"
+            f"🏗️ {obj.name}\n\n"
+            f"Пока нет добавленных расходов.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
+            ])
+        )
+        await callback.answer()
+        return
+    
+    # Формируем список расходов с иконками статусов
+    from bot.services.calculations import format_currency
+    
+    text = f"📋 <b>Расходы объекта</b>\n\n"
+    text += f"🏗️ {obj.name}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Группируем по типу
+    supplies = [e for e in expenses if e.type == ExpenseType.SUPPLIES]
+    transport = [e for e in expenses if e.type == ExpenseType.TRANSPORT]
+    overhead = [e for e in expenses if e.type == ExpenseType.OVERHEAD]
+    
+    expense_groups = [
+        ("🧰 Расходники", supplies),
+        ("🚚 Транспорт", transport),
+        ("🧾 Накладные", overhead)
+    ]
+    
+    builder = InlineKeyboardButton
+    buttons = []
+    
+    for emoji_title, exp_list in expense_groups:
+        if exp_list:
+            text += f"\n{emoji_title}:\n"
+            for exp in exp_list[:10]:  # Показываем до 10 расходов каждого типа
+                # Иконка статуса оплаты
+                if exp.payment_source == PaymentSource.PERSONAL:
+                    if exp.compensation_status == CompensationStatus.PENDING:
+                        status_icon = "⏳"  # К компенсации
+                        status_text = "К возмещению прорабу"
+                    else:
+                        status_icon = "✅"  # Компенсировано
+                        status_text = "Компенсация выполнена"
+                else:
+                    status_icon = "💳"  # Оплачено фирмой
+                    status_text = "Оплачено с карты ИП"
+                
+                date_str = exp.date.strftime("%d.%m")
+                text += f"\n{status_icon} {date_str} • {format_currency(exp.amount)}\n"
+                text += f"   {exp.description[:50]}\n"
+                text += f"   <i>{status_text}</i>\n"
+                
+                # Добавляем кнопку для детального просмотра
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{status_icon} {date_str} - {format_currency(exp.amount)}",
+                        callback_data=f"expense:detail:{exp.id}"
+                    )
+                ])
+    
+    text += f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"Всего расходов: {len(expenses)}"
+    
+    # Добавляем кнопку назад
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")])
+    
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons[:15])  # Лимит кнопок
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("expense:detail:"))
+async def view_expense_detail(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Детальный просмотр расхода"""
+    
+    expense_id = int(callback.data.split(":")[2])
+    
+    # Получаем расход
+    expense = await get_expense_by_id(session, expense_id)
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+    
+    # Форматируем детальную информацию
+    from bot.services.calculations import format_currency
+    
+    type_names = {
+        ExpenseType.SUPPLIES: "🧰 Расходники",
+        ExpenseType.TRANSPORT: "🚚 Транспортные расходы",
+        ExpenseType.OVERHEAD: "🧾 Накладные расходы"
+    }
+    
+    # Иконка и статус
+    if expense.payment_source == PaymentSource.PERSONAL:
+        if expense.compensation_status == CompensationStatus.PENDING:
+            status_icon = "⏳"
+            status_text = "К возмещению прорабу"
+            can_compensate = user.role == UserRole.ADMIN
+        else:
+            status_icon = "✅"
+            status_text = "Компенсация выполнена!"
+            can_compensate = False
+    else:
+        status_icon = "💳"
+        status_text = "Оплачено с карты ИП"
+        can_compensate = False
+    
+    text = f"{status_icon} <b>Детали расхода</b>\n\n"
+    text += f"Тип: {type_names.get(expense.type, expense.type)}\n"
+    text += f"💰 Сумма: {format_currency(expense.amount)}\n"
+    text += f"📅 Дата: {expense.date.strftime('%d.%m.%Y')}\n"
+    text += f"📝 Описание: {expense.description}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"Статус: <b>{status_text}</b>\n"
+    
+    # Кнопки
+    buttons = []
+    
+    # Если к компенсации и пользователь админ - добавляем кнопку компенсации
+    if can_compensate:
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Отметить как компенсировано",
+                callback_data=f"expense:compensate:{expense_id}"
+            )
+        ])
+    
+    # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔙 К списку расходов",
+            callback_data=f"object:view_expenses:{expense.object_id}"
+        )
+    ])
+    
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("expense:compensate:"))
+async def compensate_expense(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Отметить расход как компенсированный"""
+    
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+    
+    expense_id = int(callback.data.split(":")[2])
+    
+    # Обновляем статус
+    expense = await update_compensation_status(session, expense_id, CompensationStatus.COMPENSATED)
+    
+    if not expense:
+        await callback.answer("❌ Ошибка обновления статуса", show_alert=True)
+        return
+    
+    await callback.answer("✅ Компенсация отмечена!", show_alert=True)
+    
+    # Перенаправляем на детальный просмотр
+    await view_expense_detail(callback, user, session)
 

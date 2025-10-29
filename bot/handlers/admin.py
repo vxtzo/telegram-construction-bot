@@ -288,3 +288,4 @@ async def cmd_list_users(message: Message, user: User, session: AsyncSession):
     
     await message.answer(text.strip(), parse_mode="HTML")
 
+

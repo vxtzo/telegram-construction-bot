@@ -8,3 +8,4 @@ alembic upgrade head
 echo "Starting bot..."
 python -m bot.main
 
+

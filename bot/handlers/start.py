@@ -166,3 +166,4 @@ async def callback_no_action(callback: CallbackQuery):
     """Заглушка для неактивных кнопок"""
     await callback.answer()
 
+

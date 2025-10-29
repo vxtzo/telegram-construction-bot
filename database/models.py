@@ -36,6 +36,18 @@ class ExpenseType(str, enum.Enum):
     OVERHEAD = "overhead"  # Накладные
 
 
+class PaymentSource(str, enum.Enum):
+    """Источник оплаты расхода"""
+    COMPANY = "company"  # Оплачено фирмой
+    PERSONAL = "personal"  # Оплачено прорабом (к компенсации)
+
+
+class CompensationStatus(str, enum.Enum):
+    """Статус компенсации прорабу"""
+    PENDING = "pending"  # Ожидает компенсации
+    COMPENSATED = "compensated"  # Компенсировано
+
+
 class FileType(str, enum.Enum):
     """Типы файлов"""
     PHOTO = "photo"
@@ -122,6 +134,17 @@ class Expense(Base):
     photo_url: Mapped[Optional[str]] = mapped_column(String(500))
     added_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Новые поля для отслеживания оплаты
+    payment_source: Mapped[PaymentSource] = mapped_column(
+        Enum(PaymentSource), 
+        default=PaymentSource.COMPANY, 
+        nullable=False
+    )
+    compensation_status: Mapped[Optional[CompensationStatus]] = mapped_column(
+        Enum(CompensationStatus),
+        nullable=True  # NULL если payment_source = COMPANY
+    )
     
     # Relationships
     construction_object: Mapped["ConstructionObject"] = relationship("ConstructionObject", back_populates="expenses")

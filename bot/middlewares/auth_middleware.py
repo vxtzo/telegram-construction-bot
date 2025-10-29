@@ -107,3 +107,4 @@ class RoleMiddleware(BaseMiddleware):
         # Роль подходит, продолжаем
         return await handler(event, data)
 
+

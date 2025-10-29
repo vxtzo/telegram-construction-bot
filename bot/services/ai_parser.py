@@ -30,14 +30,18 @@ async def parse_expense_text(text: str, expense_type: str = "расход") -> D
 1. Дату (date) - в формате YYYY-MM-DD. Если не указана, используй сегодняшнюю дату: {datetime.now().strftime('%Y-%m-%d')}
 2. Сумму (amount) - числом в рублях (без символа рубля)
 3. Описание (description) - краткое описание расхода
+4. Источник оплаты (payment_source):
+   - "personal" если упоминается: "со своих денег", "к компенсации", "к возмещению", "свои деньги", "оплатил сам", "из своих"
+   - "company" если упоминается: "оплачено фирмой", "с карты ИП", "оплачено компанией", "фирма оплатила"
+   - По умолчанию "company" если не указано
 
 Верни результат СТРОГО в формате JSON:
-{{"date": "YYYY-MM-DD", "amount": число, "description": "текст"}}
+{{"date": "YYYY-MM-DD", "amount": число, "description": "текст", "payment_source": "company или personal"}}
 
 Примеры:
-- "Купил цемент на 5000 рублей 25 октября" -> {{"date": "2025-10-25", "amount": 5000, "description": "Цемент"}}
-- "Доставка материалов 3500р" -> {{"date": "{datetime.now().strftime('%Y-%m-%d')}", "amount": 3500, "description": "Доставка материалов"}}
-- "Вчера потратил 2000 на инструменты" -> {{"date": "{(datetime.now().replace(day=datetime.now().day-1)).strftime('%Y-%m-%d')}", "amount": 2000, "description": "Инструменты"}}
+- "Купил цемент на 5000 рублей 25 октября, со своих денег" -> {{"date": "2025-10-25", "amount": 5000, "description": "Цемент", "payment_source": "personal"}}
+- "Доставка материалов 3500р оплачено фирмой" -> {{"date": "{datetime.now().strftime('%Y-%m-%d')}", "amount": 3500, "description": "Доставка материалов", "payment_source": "company"}}
+- "Вчера потратил 2000 на инструменты к компенсации" -> {{"date": "{(datetime.now().replace(day=datetime.now().day-1)).strftime('%Y-%m-%d')}", "amount": 2000, "description": "Инструменты", "payment_source": "personal"}}
 """
     
     try:
@@ -63,10 +67,15 @@ async def parse_expense_text(text: str, expense_type: str = "расход") -> D
         data = json.loads(result_text)
         
         # Валидация
+        payment_source = data.get("payment_source", "company")
+        if payment_source not in ["company", "personal"]:
+            payment_source = "company"
+        
         return {
             "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
             "amount": Decimal(str(data.get("amount", 0))),
-            "description": data.get("description", "")
+            "description": data.get("description", ""),
+            "payment_source": payment_source
         }
         
     except Exception as e:
@@ -75,7 +84,8 @@ async def parse_expense_text(text: str, expense_type: str = "расход") -> D
         return {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "amount": Decimal(0),
-            "description": text[:200]  # Берем начало текста как описание
+            "description": text[:200],  # Берем начало текста как описание
+            "payment_source": "company"  # По умолчанию - оплата фирмой
         }
 
 
@@ -190,7 +200,8 @@ async def parse_voice_expense(file_path: str, expense_type: str = "расход"
         return {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "amount": Decimal(0),
-            "description": "Ошибка распознавания голоса"
+            "description": "Ошибка распознавания голоса",
+            "payment_source": "company"
         }
     
     # Затем парсим текст
@@ -212,4 +223,5 @@ async def parse_voice_advance(file_path: str) -> Dict:
         }
     
     return await parse_advance_text(text)
+
 

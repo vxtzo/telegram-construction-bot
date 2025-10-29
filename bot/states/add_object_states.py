@@ -27,3 +27,4 @@ class AddObjectStates(StatesGroup):
     # Подтверждение
     confirm_object = State()
 
+

@@ -69,3 +69,4 @@ def get_completed_objects_list(objects: List[ConstructionObject]) -> InlineKeybo
     
     return builder.as_markup()
 
+

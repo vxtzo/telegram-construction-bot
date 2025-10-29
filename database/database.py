@@ -55,3 +55,4 @@ async def close_db():
     await engine.dispose()
     print("✅ Подключение к базе данных закрыто")
 
+

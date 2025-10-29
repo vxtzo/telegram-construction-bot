@@ -127,3 +127,4 @@ def format_percentage(value: Decimal) -> str:
     """Форматировать процент"""
     return f"{value:.2f}%"
 
+

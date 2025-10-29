@@ -10,7 +10,8 @@ from sqlalchemy.orm import selectinload
 
 from database.models import (
     User, UserRole, ConstructionObject, ObjectStatus,
-    Expense, ExpenseType, Advance, File, FileType
+    Expense, ExpenseType, Advance, File, FileType,
+    PaymentSource, CompensationStatus
 )
 
 
@@ -231,7 +232,9 @@ async def create_expense(
     description: str,
     date: datetime,
     added_by: int,
-    photo_url: Optional[str] = None
+    photo_url: Optional[str] = None,
+    payment_source: PaymentSource = PaymentSource.COMPANY,
+    compensation_status: Optional[CompensationStatus] = None
 ) -> Expense:
     """Создать расход"""
     expense = Expense(
@@ -241,7 +244,9 @@ async def create_expense(
         description=description,
         date=date,
         photo_url=photo_url,
-        added_by=added_by
+        added_by=added_by,
+        payment_source=payment_source,
+        compensation_status=compensation_status
     )
     session.add(expense)
     await session.commit()
@@ -277,6 +282,49 @@ async def get_total_expenses_by_type(
     )
     total = result.scalar()
     return Decimal(total) if total else Decimal(0)
+
+
+async def get_expense_by_id(session: AsyncSession, expense_id: int) -> Optional[Expense]:
+    """Получить расход по ID"""
+    result = await session.execute(
+        select(Expense).where(Expense.id == expense_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_compensation_status(
+    session: AsyncSession,
+    expense_id: int,
+    status: CompensationStatus
+) -> Optional[Expense]:
+    """Обновить статус компенсации расхода"""
+    result = await session.execute(
+        update(Expense)
+        .where(Expense.id == expense_id)
+        .values(compensation_status=status)
+        .returning(Expense)
+    )
+    await session.commit()
+    return result.scalar_one_or_none()
+
+
+async def get_pending_compensations_by_object(
+    session: AsyncSession,
+    object_id: int
+) -> List[Expense]:
+    """Получить расходы, ожидающие компенсации по объекту"""
+    result = await session.execute(
+        select(Expense)
+        .where(
+            and_(
+                Expense.object_id == object_id,
+                Expense.payment_source == PaymentSource.PERSONAL,
+                Expense.compensation_status == CompensationStatus.PENDING
+            )
+        )
+        .order_by(Expense.date.desc())
+    )
+    return list(result.scalars().all())
 
 
 # ============ ADVANCE CRUD ============

@@ -77,3 +77,4 @@ def get_skip_or_cancel() -> InlineKeyboardMarkup:
     )
     return builder.as_markup()
 
+

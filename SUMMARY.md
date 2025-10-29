@@ -337,3 +337,4 @@ git push
 Технологии: Python 3.11, aiogram 3.x, SQLAlchemy 2.0, PostgreSQL, OpenAI API  
 Платформа: Railway.app
 
+
