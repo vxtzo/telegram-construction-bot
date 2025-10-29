@@ -11,7 +11,6 @@ from database.models import User, UserRole
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.objects_kb import get_objects_menu
 from bot.keyboards.reports_kb import get_reports_menu
-from bot.keyboards.start_kb import get_start_keyboard
 from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
