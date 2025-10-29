@@ -153,7 +153,7 @@ async def cancel_complete_object(callback: CallbackQuery):
     await callback.answer("Отменено")
 
 
-@router.callback_query(F.data.startswith("object:restore:"))
+@router.callback_query(F.data.startswith("object:restore_request:"))
 async def confirm_restore_object(callback: CallbackQuery, user: User, session: AsyncSession):
     """
     Запрос подтверждения возврата объекта в текущие

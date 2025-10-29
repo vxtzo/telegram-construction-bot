@@ -119,7 +119,7 @@ def get_object_card_keyboard(
             builder.row(
                 InlineKeyboardButton(
                     text="🔁 Вернуть в текущие",
-                    callback_data=f"object:restore:{object_id}"
+                    callback_data=f"object:restore_request:{object_id}"
                 )
             )
     
