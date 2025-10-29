@@ -1,6 +1,7 @@
 """
 Обработчики для создания нового объекта (FSM)
 """
+import asyncio
 import contextlib
 import os
 import tempfile
@@ -206,6 +207,11 @@ def _format_field_output(field: str, value: Any) -> str:
     return str(value).strip() if value else "—"
 
 
+async def _safe_delete_message(message: Message) -> None:
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+
 async def _apply_correction(message: Message, text: str, state: FSMContext) -> None:
     current_data = await state.get_data()
     parsed = await parse_object_correction(text, _ensure_all_fields(current_data))
@@ -283,6 +289,7 @@ async def start_add_object(message: Message, user: User, state: FSMContext):
 @router.callback_query(AddObjectStates.choose_mode, F.data == "object:create:mode:manual")
 async def select_manual_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await _safe_delete_message(callback.message)
     await state.set_state(AddObjectStates.enter_name)
     await _prompt_manual_name(callback.message)
 
@@ -290,6 +297,7 @@ async def select_manual_mode(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(AddObjectStates.choose_mode, F.data == "object:create:mode:pdf")
 async def select_pdf_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await _safe_delete_message(callback.message)
     await state.set_state(AddObjectStates.waiting_pdf)
 
     instructions = (
@@ -298,14 +306,6 @@ async def select_pdf_mode(callback: CallbackQuery, state: FSMContext):
         "Бот извлечёт основные данные и заполнит карточку автоматически.\n\n"
         "После загрузки вы сможете скорректировать значения текстом или голосом."
     )
-
-    with contextlib.suppress(Exception):
-        await callback.message.edit_text(
-            instructions,
-            parse_mode="HTML",
-            reply_markup=get_cancel_button()
-        )
-        return
 
     await callback.message.answer(
         instructions,
@@ -670,7 +670,8 @@ async def process_estimate_transport(message: Message, state: FSMContext):
 @router.callback_query(F.data == "object:save", AddObjectStates.confirm_object)
 async def save_object(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     """Сохранить объект в базу данных"""
-    
+
+    await _safe_delete_message(callback.message)
     data = await state.get_data()
     normalized = _normalize_object_data(_ensure_all_fields(data))
 
@@ -753,22 +754,23 @@ async def handle_voice_correction(message: Message, state: FSMContext):
 @router.callback_query(F.data == "skip")
 async def skip_step(callback: CallbackQuery, state: FSMContext):
     """Пропустить необязательный шаг"""
-    
+
     current_state = await state.get_state()
-    
+    await _safe_delete_message(callback.message)
+
     if current_state == AddObjectStates.enter_address.state:
         await state.update_data(address=None)
         await state.set_state(AddObjectStates.enter_foreman)
-        await callback.message.edit_text(
+        await callback.message.answer(
             "📝 Шаг 3/12: Введите имя бригадира/ответственного\n\n"
             "Или нажмите 'Пропустить'",
             reply_markup=get_skip_or_cancel()
         )
-    
+
     elif current_state == AddObjectStates.enter_foreman.state:
         await state.update_data(foreman_name=None)
         await state.set_state(AddObjectStates.enter_dates)
-        await callback.message.edit_text(
+        await callback.message.answer(
             "📝 Шаг 4/12: Введите даты работ\n\n"
             "Формат: <code>ДД.ММ.ГГГГ - ДД.ММ.ГГГГ</code>\n"
             "Например: <code>01.11.2025 - 30.11.2025</code>\n\n"
@@ -776,24 +778,24 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_skip_or_cancel()
         )
-    
+
     elif current_state == AddObjectStates.enter_dates.state:
         await state.update_data(start_date=None, end_date=None)
         await state.set_state(AddObjectStates.enter_prepayment)
-        await callback.message.edit_text(
+        await callback.message.answer(
             "💸 Шаг 5/12: Введите сумму предоплаты (в рублях)\n\n"
             "Например: <code>150000</code>",
             parse_mode="HTML",
             reply_markup=get_cancel_button()
         )
-    
+
     await callback.answer("Пропущено")
 
 
 @router.callback_query(F.data == "cancel")
 async def cancel_creation(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    with contextlib.suppress(Exception):
-        await callback.message.edit_text("❌ Создание объекта отменено.")
+    await _safe_delete_message(callback.message)
+    await callback.message.answer("❌ Создание объекта отменено.")
     await callback.answer("Отменено")
 
