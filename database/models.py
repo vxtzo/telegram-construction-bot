@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Optional
 from sqlalchemy import (
     Integer, String, BigInteger, Boolean, DateTime, 
-    Numeric, Text, Enum, ForeignKey, UniqueConstraint
+    Numeric, Text, Enum, ForeignKey, UniqueConstraint, LargeBinary
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import enum
@@ -99,9 +99,6 @@ class ConstructionObject(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     
-    # Google Drive folder ID для этого объекта
-    gdrive_folder_id: Mapped[Optional[str]] = mapped_column(String(255))
-    
     # Relationships
     creator: Mapped["User"] = relationship("User", back_populates="created_objects", foreign_keys=[created_by])
     expenses: Mapped[list["Expense"]] = relationship("Expense", back_populates="construction_object", cascade="all, delete-orphan")
@@ -162,10 +159,11 @@ class File(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     object_id: Mapped[int] = mapped_column(Integer, ForeignKey("objects.id"), nullable=False, index=True)
     file_type: Mapped[FileType] = mapped_column(Enum(FileType), nullable=False)
-    gdrive_file_id: Mapped[Optional[str]] = mapped_column(String(255))
-    gdrive_url: Mapped[Optional[str]] = mapped_column(String(500))
-    telegram_file_id: Mapped[Optional[str]] = mapped_column(String(255))
+    telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)  # ID файла в Telegram
+    file_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary)  # Бинарные данные файла
     filename: Mapped[Optional[str]] = mapped_column(String(500))
+    mime_type: Mapped[Optional[str]] = mapped_column(String(100))
+    file_size: Mapped[Optional[int]] = mapped_column(Integer)  # Размер в байтах
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     
     # Relationships

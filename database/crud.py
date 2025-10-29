@@ -342,28 +342,21 @@ async def get_total_advances(session: AsyncSession, object_id: int) -> Decimal:
 
 # ============ FILE CRUD ============
 
-async def create_file(
-    session: AsyncSession,
-    object_id: int,
-    file_type: FileType,
-    telegram_file_id: Optional[str] = None,
-    gdrive_file_id: Optional[str] = None,
-    gdrive_url: Optional[str] = None,
-    filename: Optional[str] = None
-) -> File:
+async def create_file(session: AsyncSession, file_data: dict) -> File:
     """Создать запись о файле"""
-    file = File(
-        object_id=object_id,
-        file_type=file_type,
-        telegram_file_id=telegram_file_id,
-        gdrive_file_id=gdrive_file_id,
-        gdrive_url=gdrive_url,
-        filename=filename
-    )
+    file = File(**file_data)
     session.add(file)
     await session.commit()
     await session.refresh(file)
     return file
+
+
+async def get_file_by_id(session: AsyncSession, file_id: int) -> Optional[File]:
+    """Получить файл по ID"""
+    result = await session.execute(
+        select(File).where(File.id == file_id)
+    )
+    return result.scalar_one_or_none()
 
 
 async def get_files_by_object(
