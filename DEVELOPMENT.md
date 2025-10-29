@@ -28,6 +28,7 @@
 - `calculations.py` - Формулы расчета прибыли
 - `report_generator.py` - Генерация текстовых отчетов
 - `gdrive_service.py` - Работа с Google Drive API
+- `pdf_parser.py` - Извлечение текста из PDF и автозаполнение карточки объекта/правок
 
 #### bot/middlewares/
 - `auth_middleware.py` - Проверка авторизации пользователей

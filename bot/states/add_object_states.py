@@ -7,6 +7,10 @@ from aiogram.fsm.state import State, StatesGroup
 class AddObjectStates(StatesGroup):
     """Состояния для пошагового создания объекта"""
     
+    choose_mode = State()
+
+    waiting_pdf = State()
+
     # Основная информация
     enter_name = State()
     enter_address = State()
