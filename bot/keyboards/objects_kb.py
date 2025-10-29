@@ -107,7 +107,7 @@ def get_object_card_keyboard(
             builder.row(
                 InlineKeyboardButton(
                     text="✅ Завершить объект",
-                    callback_data=f"object:complete:{object_id}"
+                    callback_data=f"object:complete_request:{object_id}"
                 )
             )
     

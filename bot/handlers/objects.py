@@ -85,7 +85,7 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("object:complete:"))
+@router.callback_query(F.data.startswith("object:complete_request:"))
 async def confirm_complete_object(callback: CallbackQuery, user: User, session: AsyncSession):
     """
     Запрос подтверждения завершения объекта
