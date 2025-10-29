@@ -23,6 +23,7 @@ from bot.services.report_generator import (
     generate_object_report,
     generate_period_report
 )
+from bot.utils.messaging import delete_message, send_new_message
 from bot.keyboards.main_menu import get_cancel_button
 
 router = Router()
@@ -41,11 +42,12 @@ async def select_object_for_report(callback: CallbackQuery, user: User, session:
     # Получаем завершенные объекты
     objects = await get_objects_by_status(session, ObjectStatus.COMPLETED)
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "📄 <b>Отчёт за завершённый объект</b>\n\n"
         "Выберите объект:",
         parse_mode="HTML",
-        reply_markup=get_completed_objects_list(objects)
+        reply_markup=get_completed_objects_list(objects),
     )
     await callback.answer()
 
@@ -73,6 +75,8 @@ async def generate_object_report_callback(callback: CallbackQuery, user: User, s
     # Генерируем отчет
     report = generate_object_report(obj, files)
     
+    await delete_message(callback.message)
+
     # Отправляем отчет (если он длинный, можем разбить на несколько сообщений)
     if len(report) > 4096:
         # Telegram ограничивает длину сообщения 4096 символами
@@ -96,11 +100,12 @@ async def select_report_period(callback: CallbackQuery, user: User, state: FSMCo
     
     await state.clear()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "📅 <b>Отчёт за период</b>\n\n"
         "Выберите период:",
         parse_mode="HTML",
-        reply_markup=get_period_selection()
+        reply_markup=get_period_selection(),
     )
     await callback.answer()
 
@@ -117,11 +122,12 @@ async def report_period_year(callback: CallbackQuery, user: User, state: FSMCont
     
     current_year = datetime.now().year
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"📅 <b>Отчёт за год</b>\n\n"
-        f"Введите год (например: {current_year}):",
+        f"Укажите год (например, {current_year}):",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -167,12 +173,13 @@ async def report_period_month(callback: CallbackQuery, user: User, state: FSMCon
     
     current_date = datetime.now()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"📅 <b>Отчёт за месяц</b>\n\n"
         f"Введите месяц и год в формате <code>ММ.ГГГГ</code>\n"
         f"Например: <code>{current_date.strftime('%m.%Y')}</code>",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -226,12 +233,13 @@ async def report_period_range(callback: CallbackQuery, user: User, state: FSMCon
     
     await state.set_state(ReportPeriodStates.waiting_date_from)
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"📅 <b>Отчёт за диапазон дат</b>\n\n"
         f"Введите дату начала в формате <code>ДД.ММ.ГГГГ</code>\n"
         f"Например: <code>01.10.2025</code>",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 

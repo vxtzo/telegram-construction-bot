@@ -23,6 +23,7 @@ from bot.keyboards.objects_kb import (
 )
 from bot.keyboards.main_menu import get_confirm_keyboard
 from bot.services.report_generator import generate_object_report
+from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
 
@@ -46,10 +47,11 @@ async def show_objects_list(callback: CallbackQuery, session: AsyncSession, stat
     else:
         text = f"📋 <b>{status_text} объекты</b>\n\nВсего объектов: {len(objects)}\n\nВыберите объект для просмотра:"
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         text,
         parse_mode="HTML",
-        reply_markup=get_objects_list_keyboard(objects, status)
+        reply_markup=get_objects_list_keyboard(objects, status),
     )
     await callback.answer()
 
@@ -78,10 +80,11 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
     report_text = generate_object_report(obj, files)
     
     # Отправляем отчет с клавиатурой
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         report_text,
         parse_mode="HTML",
-        reply_markup=get_object_card_keyboard(object_id, obj.status, user.role)
+        reply_markup=get_object_card_keyboard(object_id, obj.status, user.role),
     )
     await callback.answer()
 
@@ -105,13 +108,14 @@ async def confirm_complete_object(callback: CallbackQuery, user: User, session: 
         await callback.answer("❌ Объект не найден", show_alert=True)
         return
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"⚠️ <b>Завершение объекта</b>\n\n"
         f"Вы уверены, что хотите завершить объект:\n"
         f"<b>{obj.name}</b>?\n\n"
         f"Объект будет перемещен в раздел 'Завершённые объекты'.",
         parse_mode="HTML",
-        reply_markup=get_confirm_keyboard(f"object:complete:confirm:{object_id}", "object:complete:cancel")
+        reply_markup=get_confirm_keyboard(f"object:complete:confirm:{object_id}", "object:complete:cancel"),
     )
     await callback.answer()
 
@@ -124,7 +128,7 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
     await callback.answer()  # Сразу отвечаем, чтобы убрать индикатор загрузки
     
     if user.role != UserRole.ADMIN:
-        await callback.message.answer("❌ Недостаточно прав")
+        await send_new_message(callback, "❌ Недостаточно прав")
         return
     
     object_id = int(callback.data.split(":")[3])
@@ -133,13 +137,14 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
     obj = await update_object_status(session, object_id, ObjectStatus.COMPLETED)
     
     if not obj:
-        await callback.message.answer("❌ Ошибка завершения объекта")
+        await send_new_message(callback, "❌ Ошибка завершения объекта")
         return
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"✅ <b>Объект завершен</b>\n\n"
         f"Объект <b>{obj.name}</b> успешно перемещен в раздел 'Завершённые объекты'.",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
 
 
@@ -148,8 +153,9 @@ async def cancel_complete_object(callback: CallbackQuery):
     """
     Отменить завершение объекта
     """
-    await callback.message.edit_text(
-        "❌ Завершение объекта отменено."
+    await send_new_message(
+        callback,
+        "❌ Завершение объекта отменено.",
     )
     await callback.answer("Отменено")
 
@@ -173,13 +179,14 @@ async def confirm_restore_object(callback: CallbackQuery, user: User, session: A
         await callback.answer("❌ Объект не найден", show_alert=True)
         return
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"⚠️ <b>Возврат объекта в текущие</b>\n\n"
         f"Вы уверены, что хотите вернуть объект:\n"
         f"<b>{obj.name}</b>\n\n"
         f"в раздел 'Текущие объекты'?",
         parse_mode="HTML",
-        reply_markup=get_confirm_keyboard(f"object:restore:confirm:{object_id}", "object:restore:cancel")
+        reply_markup=get_confirm_keyboard(f"object:restore:confirm:{object_id}", "object:restore:cancel"),
     )
     await callback.answer()
 
@@ -203,10 +210,11 @@ async def restore_object(callback: CallbackQuery, user: User, session: AsyncSess
         await callback.answer("❌ Ошибка возврата объекта", show_alert=True)
         return
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"✅ <b>Объект возвращен</b>\n\n"
         f"Объект <b>{obj.name}</b> успешно перемещен в раздел 'Текущие объекты'.",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
     await callback.answer("✅ Объект возвращен")
 
@@ -216,8 +224,9 @@ async def cancel_restore_object(callback: CallbackQuery):
     """
     Отменить возврат объекта
     """
-    await callback.message.edit_text(
-        "❌ Возврат объекта отменён."
+    await send_new_message(
+        callback,
+        "❌ Возврат объекта отменён.",
     )
     await callback.answer("Отменено")
 
@@ -236,14 +245,15 @@ async def view_advances_list(callback: CallbackQuery, user: User, session: Async
     advances = await get_advances_by_object(session, object_id)
 
     if not advances:
-        await callback.message.edit_text(
+        await send_new_message(
+            callback,
             f"📄 <b>Авансы по объекту</b>\n\n"
             f"🏗️ {obj.name}\n\n"
             f"Пока нет добавленных авансов.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-            ])
+            ]),
         )
         await callback.answer()
         return
@@ -277,7 +287,8 @@ async def view_advances_list(callback: CallbackQuery, user: User, session: Async
         [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
     ])
 
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         text,
         parse_mode="HTML",
         reply_markup=reply_markup
@@ -301,14 +312,15 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
     expenses = await get_expenses_by_object(session, object_id)
     
     if not expenses:
-        await callback.message.edit_text(
+        await send_new_message(
+            callback,
             f"📋 <b>Расходы объекта</b>\n\n"
             f"🏗️ {obj.name}\n\n"
             f"Пока нет добавленных расходов.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-            ])
+            ]),
         )
         await callback.answer()
         return
@@ -373,7 +385,8 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
     # Добавляем кнопку назад
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")])
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons[:15])  # Лимит кнопок
@@ -449,10 +462,11 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
         )
     ])
  
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         text,
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
     if has_receipt:

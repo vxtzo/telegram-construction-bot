@@ -28,6 +28,7 @@ from bot.services.ai_parser import (
     parse_voice_advance
 )
 from bot.services.calculations import format_currency
+from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
 
@@ -52,10 +53,11 @@ async def show_expense_type_menu(callback: CallbackQuery, session: AsyncSession)
         [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
     ])
 
-    await callback.message.answer(
+    await send_new_message(
+        callback,
         f"Выберите тип расхода для объекта <b>{obj.name}</b>",
         parse_mode="HTML",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
     await callback.answer()
 
@@ -100,7 +102,8 @@ async def start_add_expense(callback: CallbackQuery, state: FSMContext, session:
     )
     await state.set_state(AddExpenseStates.waiting_input)
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"{emoji} <b>Добавление {type_name}</b>\n\n"
         f"Объект: <b>{obj.name}</b>\n\n"
         f"Опишите расход в свободной форме (текстом или голосом):\n\n"
@@ -110,7 +113,7 @@ async def start_add_expense(callback: CallbackQuery, state: FSMContext, session:
         f"• \"Вчера потратил 2000 на инструменты\"\n\n"
         f"Я автоматически определю дату, сумму и описание.",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -236,11 +239,12 @@ async def retry_expense_input(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AddExpenseStates.waiting_input)
     data = await state.get_data()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"📝 Попробуйте описать расход ещё раз:\n\n"
         f"Объект: <b>{data['object_name']}</b>",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -275,10 +279,11 @@ async def confirm_expense(callback: CallbackQuery, user: User, state: FSMContext
     elif payment_source_ai == "company":
         ai_hint = "\n\n💡 <i>Похоже, это оплата фирмой</i>"
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"💳 <b>Кто оплатил расход?</b>{ai_hint}",
         parse_mode="HTML",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
     await callback.answer()
 
@@ -300,11 +305,12 @@ async def select_payment_source(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "📸 <b>Хотите добавить фото чека?</b>\n\n"
         "Отправьте фото или нажмите 'Пропустить'",
         parse_mode="HTML",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
     await callback.answer()
 
@@ -404,12 +410,13 @@ async def skip_expense_photo(callback: CallbackQuery, user: User, session: Async
     
     await state.clear()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"✅ <b>Расход добавлен!</b>\n\n"
         f"Объект: {data['object_name']}\n"
         f"Сумма: {format_currency(data['parsed_amount'])}\n"
         f"Дата: {date_obj.strftime('%d.%m.%Y')}",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
     await callback.answer("✅ Расход добавлен")
 
@@ -434,7 +441,8 @@ async def start_add_advance(callback: CallbackQuery, state: FSMContext, session:
     )
     await state.set_state(AddAdvanceStates.waiting_input)
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"💵 <b>Добавление аванса</b>\n\n"
         f"Объект: <b>{obj.name}</b>\n\n"
         f"Опишите аванс в свободной форме (текстом или голосом):\n\n"
@@ -444,7 +452,7 @@ async def start_add_advance(callback: CallbackQuery, state: FSMContext, session:
         f"• \"Сидоров получил 8000 за штукатурку\"\n\n"
         f"Я автоматически определю имя рабочего, вид работ, сумму и дату.",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -551,11 +559,12 @@ async def retry_advance_input(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AddAdvanceStates.waiting_input)
     data = await state.get_data()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"📝 Попробуйте описать аванс ещё раз:\n\n"
         f"Объект: <b>{data['object_name']}</b>",
         parse_mode="HTML",
-        reply_markup=get_cancel_button()
+        reply_markup=get_cancel_button(),
     )
     await callback.answer()
 
@@ -581,14 +590,15 @@ async def confirm_advance(callback: CallbackQuery, user: User, session: AsyncSes
     
     await state.clear()
     
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         f"✅ <b>Аванс добавлен!</b>\n\n"
         f"Объект: {data['object_name']}\n"
         f"Рабочий: {data['parsed_worker_name']}\n"
         f"Вид работ: {data['parsed_work_type']}\n"
         f"Сумма: {format_currency(data['parsed_amount'])}\n"
-        f"Дата: {date_obj.strftime('%d.%m.%Y')}",
-        parse_mode="HTML"
+        f"Дата: {date_obj.strftime('%d.%м.%Y')}",
+        parse_mode="HTML",
     )
     await callback.answer("✅ Аванс добавлен")
 

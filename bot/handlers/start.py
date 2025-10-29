@@ -11,6 +11,8 @@ from database.models import User, UserRole
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.objects_kb import get_objects_menu
 from bot.keyboards.reports_kb import get_reports_menu
+from bot.keyboards.start_kb import get_start_keyboard
+from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
 
@@ -115,9 +117,10 @@ async def menu_reports(message: Message, user: User, state: FSMContext):
 async def callback_main_menu(callback: CallbackQuery, user: User, state: FSMContext):
     """Вернуться в главное меню"""
     await state.clear()
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "🏠 <b>Главное меню</b>\n\nВыберите действие из меню ниже:",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -126,10 +129,11 @@ async def callback_main_menu(callback: CallbackQuery, user: User, state: FSMCont
 async def callback_objects_menu(callback: CallbackQuery, state: FSMContext):
     """Вернуться в меню объектов"""
     await state.clear()
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "🏗️ <b>ОБЪЕКТЫ</b>\n\nВыберите категорию:",
         parse_mode="HTML",
-        reply_markup=get_objects_menu()
+        reply_markup=get_objects_menu(),
     )
     await callback.answer()
 
@@ -143,7 +147,8 @@ async def callback_reports_menu(callback: CallbackQuery, user: User, state: FSMC
         return
     
     await state.clear()
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "📊 <b>СОЗДАНИЕ ОТЧЁТА</b>\n\nВыберите тип отчёта:",
         parse_mode="HTML",
         reply_markup=get_reports_menu()
@@ -155,7 +160,8 @@ async def callback_reports_menu(callback: CallbackQuery, user: User, state: FSMC
 async def callback_cancel(callback: CallbackQuery, user: User, state: FSMContext):
     """Отмена текущего действия"""
     await state.clear()
-    await callback.message.edit_text(
+    await send_new_message(
+        callback,
         "❌ Действие отменено.\n\nВыберите действие из меню ниже:"
     )
     await callback.answer("Отменено")

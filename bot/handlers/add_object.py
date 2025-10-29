@@ -26,6 +26,7 @@ from bot.services.pdf_parser import (
 )
 from bot.services.ai_parser import transcribe_voice
 from bot.services.calculations import format_currency
+from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
 
@@ -193,9 +194,6 @@ async def _prompt_manual_name(message: Message) -> None:
         "Например: <i>Вячеслав С поворотом</i>"
     )
     markup = get_cancel_button()
-    with contextlib.suppress(Exception):
-        await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
-        return
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
@@ -205,11 +203,6 @@ def _format_field_output(field: str, value: Any) -> str:
     if field in DATE_FIELDS:
         return _format_date(_parse_date_value(value))
     return str(value).strip() if value else "—"
-
-
-async def _safe_delete_message(message: Message) -> None:
-    with contextlib.suppress(Exception):
-        await message.delete()
 
 
 async def _apply_correction(message: Message, text: str, state: FSMContext) -> None:
@@ -289,7 +282,7 @@ async def start_add_object(message: Message, user: User, state: FSMContext):
 @router.callback_query(AddObjectStates.choose_mode, F.data == "object:create:mode:manual")
 async def select_manual_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await _safe_delete_message(callback.message)
+    await delete_message(callback.message)
     await state.set_state(AddObjectStates.enter_name)
     await _prompt_manual_name(callback.message)
 
@@ -297,7 +290,7 @@ async def select_manual_mode(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(AddObjectStates.choose_mode, F.data == "object:create:mode:pdf")
 async def select_pdf_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await _safe_delete_message(callback.message)
+    await delete_message(callback.message)
     await state.set_state(AddObjectStates.waiting_pdf)
 
     instructions = (
@@ -671,7 +664,7 @@ async def process_estimate_transport(message: Message, state: FSMContext):
 async def save_object(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     """Сохранить объект в базу данных"""
 
-    await _safe_delete_message(callback.message)
+    await delete_message(callback.message)
     data = await state.get_data()
     normalized = _normalize_object_data(_ensure_all_fields(data))
 
@@ -705,17 +698,19 @@ async def save_object(callback: CallbackQuery, user: User, session: AsyncSession
         
         await state.clear()
         
-        await callback.message.edit_text(
+        await send_new_message(
+            callback,
             f"✅ <b>Объект успешно добавлен!</b>\n\n"
             f"Объект <b>'{obj.name}'</b> добавлен в Текущие объекты.\n\n"
             f"ID объекта: {obj.id}",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         await callback.answer("✅ Объект создан")
         
     except Exception as e:
-        await callback.message.edit_text(
-            f"❌ Ошибка при создании объекта:\n{str(e)}"
+        await send_new_message(
+            callback,
+            f"❌ Ошибка при создании объекта:\n{str(e)}",
         )
         await callback.answer("❌ Ошибка")
 
@@ -756,7 +751,7 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
     """Пропустить необязательный шаг"""
 
     current_state = await state.get_state()
-    await _safe_delete_message(callback.message)
+    await delete_message(callback.message)
 
     if current_state == AddObjectStates.enter_address.state:
         await state.update_data(address=None)
@@ -795,7 +790,7 @@ async def skip_step(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "cancel")
 async def cancel_creation(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await _safe_delete_message(callback.message)
+    await delete_message(callback.message)
     await callback.message.answer("❌ Создание объекта отменено.")
     await callback.answer("Отменено")
 
