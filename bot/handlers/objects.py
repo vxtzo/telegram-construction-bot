@@ -2,10 +2,10 @@
 Обработчики для просмотра объектов
 """
 import math
+import hashlib
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import quote_plus, unquote_plus
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Message
@@ -45,6 +45,7 @@ router = Router()
 EXPENSES_PAGE_SIZE = 10
 ADVANCES_WORK_PAGE_SIZE = 10
 UNSPECIFIED_WORK_TYPE_LABEL = "Без указания вида работ"
+DEFAULT_WORK_TYPE_TOKEN = "default"
 
 
 EXPENSE_TYPE_ICONS = {
@@ -87,7 +88,7 @@ def _build_worktype_navigation(prefix: str, object_id: int, page: int, total_pag
 
 
 def _normalize_work_type(value: str | None) -> str:
-    return (value or "").strip().lower()
+    return (_display_work_type(value)).lower()
 
 
 def _display_work_type(value: str | None) -> str:
@@ -95,16 +96,16 @@ def _display_work_type(value: str | None) -> str:
     return cleaned or UNSPECIFIED_WORK_TYPE_LABEL
 
 
-def _encode_work_type_token(value: str | None) -> str:
-    display = _display_work_type(value)
-    token = quote_plus(display, safe="")
-    return token or "-"
+def _make_work_type_token(value: str | None) -> str:
+    normalized = _normalize_work_type(value)
+    if not normalized:
+        return DEFAULT_WORK_TYPE_TOKEN
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
-def _decode_work_type_token(token: str | None) -> str:
-    if not token or token == "-":
-        return UNSPECIFIED_WORK_TYPE_LABEL
-    return unquote_plus(token)
+def _is_default_work_type_token(token: str | None) -> bool:
+    return not token or token == DEFAULT_WORK_TYPE_TOKEN
 
 
 async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
@@ -206,14 +207,17 @@ async def _send_advances_overview(callback: CallbackQuery, session: AsyncSession
     for advance in advances:
         normalized = _normalize_work_type(advance.work_type)
         display = _display_work_type(advance.work_type)
+        token = _make_work_type_token(advance.work_type)
         bucket = grouped.setdefault(
-            normalized,
+            token,
             {
                 "label": display,
                 "total": Decimal(0),
                 "count": 0,
                 "min_date": None,
                 "max_date": None,
+                "token": token,
+                "normalized": normalized,
             }
         )
         bucket["total"] += advance.amount
@@ -257,11 +261,10 @@ async def _send_advances_overview(callback: CallbackQuery, session: AsyncSession
             f"   📅 {period}"
         )
 
-        token = _encode_work_type_token(label)
         keyboard.row(
             InlineKeyboardButton(
                 text=f"⚒ {label} • {format_currency(total)}",
-                callback_data=f"advance:worktype:{object_id}:1:{token}"
+                callback_data=f"advance:worktype:{object_id}:1:{bucket['token']}"
             )
         )
 
@@ -279,7 +282,6 @@ async def _send_advances_worktype_page(
     callback: CallbackQuery,
     session: AsyncSession,
     object_id: int,
-    work_type_label: str,
     work_type_token: str,
     page: int,
 ) -> None:
@@ -289,16 +291,33 @@ async def _send_advances_worktype_page(
         return
 
     advances = await get_advances_by_object(session, object_id)
-    normalized_target = _normalize_work_type(work_type_label)
-    filtered = [
-        advance for advance in advances
-        if _normalize_work_type(advance.work_type) == normalized_target
-    ]
 
-    if not filtered:
+    grouped: dict[str, dict[str, object]] = {}
+    for advance in advances:
+        token = _make_work_type_token(advance.work_type)
+        bucket = grouped.setdefault(
+            token,
+            {
+                "label": _display_work_type(advance.work_type),
+                "advances": [],
+                "min_date": None,
+                "max_date": None,
+            }
+        )
+        bucket["advances"].append(advance)
+        if advance.date:
+            if bucket["min_date"] is None or advance.date < bucket["min_date"]:
+                bucket["min_date"] = advance.date
+            if bucket["max_date"] is None or advance.date > bucket["max_date"]:
+                bucket["max_date"] = advance.date
+
+    bucket = grouped.get(work_type_token)
+    if not bucket:
         await _send_advances_overview(callback, session, object_id)
         return
 
+    filtered = bucket["advances"]
+    label = bucket["label"]
     total = len(filtered)
     total_pages = math.ceil(total / ADVANCES_WORK_PAGE_SIZE)
     page = _normalize_page(page, total_pages)
@@ -306,8 +325,8 @@ async def _send_advances_worktype_page(
     current_items = filtered[start:start + ADVANCES_WORK_PAGE_SIZE]
 
     total_amount = sum((advance.amount for advance in filtered), Decimal(0))
-    min_date = min((adv.date for adv in filtered if adv.date), default=None)
-    max_date = max((adv.date for adv in filtered if adv.date), default=None)
+    min_date = bucket["min_date"]
+    max_date = bucket["max_date"]
 
     worker_totals: defaultdict[str, Decimal] = defaultdict(Decimal)
     worker_counts: defaultdict[str, int] = defaultdict(int)
@@ -328,7 +347,7 @@ async def _send_advances_worktype_page(
         period = "—"
 
     lines = [
-        f"⚒ <b>{work_type_label}</b>",
+        f"⚒ <b>{label}</b>",
         f"🏗️ {obj.name}",
         f"Страница {page}/{total_pages}",
         "━━━━━━━━━━━━━━━━━━━━━━",
@@ -519,7 +538,7 @@ def _build_advance_detail_view(
         )
 
     if work_type_token and work_type_token != "-":
-        back_callback = f"advance:worktype:{object_id}:{page}:{work_type_token}"
+        back_callback = f"advance:worktype:{object_id}:1:{work_type_token}"
     else:
         back_callback = f"object:view_advances:{object_id}"
 
@@ -764,10 +783,9 @@ async def view_advances_by_worktype(callback: CallbackQuery, user: User, session
     parts = callback.data.split(":")
     object_id = int(parts[2])
     page = int(parts[3]) if len(parts) > 3 else 1
-    work_type_token = parts[4]
+    work_type_token = parts[4] if len(parts) > 4 else DEFAULT_WORK_TYPE_TOKEN
 
-    work_type_label = _decode_work_type_token(work_type_token)
-    await _send_advances_worktype_page(callback, session, object_id, work_type_label, work_type_token, page)
+    await _send_advances_worktype_page(callback, session, object_id, work_type_token, page)
     await callback.answer()
 
 
@@ -1073,7 +1091,7 @@ async def view_advance_detail(callback: CallbackQuery, user: User, session: Asyn
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
-    work_type_token = parts[5] if len(parts) > 5 else "-"
+    work_type_token = parts[5] if len(parts) > 5 else DEFAULT_WORK_TYPE_TOKEN
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -1171,7 +1189,7 @@ async def apply_advance_edit(message: Message, session: AsyncSession, state: FSM
     object_id = data.get("object_id")
     page = data.get("page", 1)
     field = data.get("field")
-    work_token = data.get("work_token", "-")
+    work_token = data.get("work_token", DEFAULT_WORK_TYPE_TOKEN)
 
     if not advance_id or not field:
         await message.answer("⚠️ Некорректное состояние. Попробуйте снова.")
@@ -1217,7 +1235,8 @@ async def apply_advance_edit(message: Message, session: AsyncSession, state: FSM
 
     await state.clear()
 
-    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page, work_token)
+    new_token = _make_work_type_token(advance.work_type)
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page, new_token)
     await message.answer("✅ Изменения сохранены.")
     await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
@@ -1230,7 +1249,7 @@ async def cancel_advance_edit(callback: CallbackQuery, session: AsyncSession, st
     advance_id = data.get("advance_id")
     object_id = data.get("object_id")
     page = data.get("page", 1)
-    work_token = data.get("work_token", "-")
+    work_token = data.get("work_token", DEFAULT_WORK_TYPE_TOKEN)
 
     if not advance_id:
         await callback.answer("Отменено")
@@ -1303,9 +1322,8 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
     await state.clear()
     await callback.answer("🗑 Аванс удалён", show_alert=True)
 
-    if work_token and work_token != "-":
-        work_label = _decode_work_type_token(work_token)
-        await _send_advances_worktype_page(callback, session, object_id, work_label, work_token, page)
-    else:
+    if _is_default_work_type_token(work_token):
         await _send_advances_overview(callback, session, object_id)
+    else:
+        await _send_advances_worktype_page(callback, session, object_id, work_token, page)
 
