@@ -1,9 +1,12 @@
 """Обработчики для управления расходами фирмы"""
 from __future__ import annotations
 
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
-from typing import Optional
+import calendar
+import os
+import tempfile
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Optional, Union
 from urllib.parse import quote_plus, unquote_plus
 
 from aiogram import Router, F
@@ -13,6 +16,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.main_menu import get_cancel_button
+from bot.services.ai_parser import (
+    parse_company_expense_text,
+    parse_voice_company_expense,
+)
 from bot.services.calculations import format_currency
 from bot.states.company_expense_states import CompanyExpenseStates, CompanyRecurringExpenseStates
 from bot.utils.messaging import send_new_message
@@ -29,12 +36,17 @@ from database.crud import (
 )
 from database.models import User, UserRole
 
-
 router = Router()
 
+Sender = Union[Message, CallbackQuery]
 
 ONE_TIME_LOG_TYPE = "one_time"
 RECURRING_LOG_TYPE = "recurring"
+
+MONTH_NAMES = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
 
 
 def _format_user_name(user: Optional[User]) -> str:
@@ -51,6 +63,13 @@ def _decode_token(value: str) -> str:
     return unquote_plus(value)
 
 
+async def _reply(sender: Sender, text: str, **kwargs) -> None:
+    if isinstance(sender, CallbackQuery):
+        await send_new_message(sender, text, **kwargs)
+    else:
+        await sender.answer(text, **kwargs)
+
+
 def _company_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="💸 Разовые расходы", callback_data="company:one_time"))
@@ -59,19 +78,34 @@ def _company_menu_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-async def _send_one_time_overview(message_or_callback, session: AsyncSession) -> None:
+def _one_time_confirm_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✅ Сохранить", callback_data="company:one_time:save"))
+    builder.row(
+        InlineKeyboardButton(text="📅 Сегодня", callback_data="company:one_time:date:today"),
+        InlineKeyboardButton(text="📅 Вчера", callback_data="company:one_time:date:yesterday"),
+    )
+    builder.row(InlineKeyboardButton(text="📆 Указать дату", callback_data="company:one_time:date:manual"))
+    builder.row(InlineKeyboardButton(text="🔁 Ввести заново", callback_data="company:one_time:retry"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="company:cancel"))
+    return builder.as_markup()
+
+
+def _recurring_confirm_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✅ Сохранить", callback_data="company:recurring:save"))
+    builder.row(InlineKeyboardButton(text="📅 День оплаты", callback_data="company:recurring:day"))
+    builder.row(InlineKeyboardButton(text="📆 Начало", callback_data="company:recurring:start"))
+    builder.row(InlineKeyboardButton(text="🔁 Ввести заново", callback_data="company:recurring:retry"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="company:cancel"))
+    return builder.as_markup()
+
+
+async def _send_one_time_overview(sender: Sender, session: AsyncSession) -> None:
     categories = await get_company_expense_categories(session)
 
-    if isinstance(message_or_callback, CallbackQuery):
-        sender = message_or_callback
-        send = send_new_message
-    else:
-        sender = message_or_callback
-        async def send(sender, text, **kwargs):
-            await sender.answer(text, **kwargs)
-    
     if not categories:
-        await send(
+        await _reply(
             sender,
             "💸 <b>Разовые расходы</b>\n\nПока нет записей.",
             parse_mode="HTML",
@@ -89,11 +123,12 @@ async def _send_one_time_overview(message_or_callback, session: AsyncSession) ->
 
     lines = [
         "💸 <b>Разовые расходы</b>",
-        f"Всего суммой: {format_currency(overall_total)}",
+        f"Всего: {format_currency(overall_total)}",
         f"Записей: {overall_count}",
         "",
         "Категории:",
     ]
+
     keyboard = InlineKeyboardBuilder()
 
     for idx, (category, total, count) in enumerate(categories, start=1):
@@ -112,7 +147,7 @@ async def _send_one_time_overview(message_or_callback, session: AsyncSession) ->
     keyboard.row(InlineKeyboardButton(text="➕ Добавить", callback_data="company:one_time:add"))
     keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data="company:menu"))
 
-    await send(
+    await _reply(
         sender,
         "\n".join(lines),
         parse_mode="HTML",
@@ -120,19 +155,11 @@ async def _send_one_time_overview(message_or_callback, session: AsyncSession) ->
     )
 
 
-async def _send_recurring_overview(message_or_callback, session: AsyncSession) -> None:
+async def _send_recurring_overview(sender: Sender, session: AsyncSession) -> None:
     categories = await get_company_recurring_categories(session)
 
-    if isinstance(message_or_callback, CallbackQuery):
-        sender = message_or_callback
-        send = send_new_message
-    else:
-        sender = message_or_callback
-        async def send(sender, text, **kwargs):
-            await sender.answer(text, **kwargs)
-
     if not categories:
-        await send(
+        await _reply(
             sender,
             "♻️ <b>Ежемесячные расходы</b>\n\nПока нет записей.",
             parse_mode="HTML",
@@ -150,18 +177,19 @@ async def _send_recurring_overview(message_or_callback, session: AsyncSession) -
 
     lines = [
         "♻️ <b>Ежемесячные расходы</b>",
-        f"Всего суммой: {format_currency(overall_total)}",
-        f"Записей: {overall_count}",
+        f"Всего ежемесячно: {format_currency(overall_total)}",
+        f"Активных записей: {overall_count}",
         "",
         "Категории:",
     ]
+
     keyboard = InlineKeyboardBuilder()
 
     for idx, (category, total, count) in enumerate(categories, start=1):
         token = _encode_token(category)
         lines.append(
             f"\n{idx}. <b>{category}</b>\n"
-            f"   💰 {format_currency(total)} • записей: {count}"
+            f"   💰 {format_currency(total)} • шаблонов: {count}"
         )
         keyboard.row(
             InlineKeyboardButton(
@@ -173,7 +201,7 @@ async def _send_recurring_overview(message_or_callback, session: AsyncSession) -
     keyboard.row(InlineKeyboardButton(text="➕ Добавить", callback_data="company:recurring:add"))
     keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data="company:menu"))
 
-    await send(
+    await _reply(
         sender,
         "\n".join(lines),
         parse_mode="HTML",
@@ -210,10 +238,9 @@ async def _send_one_time_category(callback: CallbackQuery, session: AsyncSession
     keyboard = InlineKeyboardBuilder()
     for exp in expenses:
         date_str = exp.date.strftime("%d.%m.%Y")
-        user_name = _format_user_name(exp.user)
         lines.append(
             f"\n• {date_str} — {format_currency(exp.amount)}\n"
-            f"  Добавил: {user_name}\n"
+            f"  👤 { _format_user_name(exp.user) }\n"
             f"  {exp.description or '—'}"
         )
         keyboard.row(
@@ -234,14 +261,20 @@ async def _send_one_time_category(callback: CallbackQuery, session: AsyncSession
     )
 
 
+def _first_payment_date(year: int, month: int, day: int) -> datetime:
+    last_day = calendar.monthrange(year, month)[1]
+    safe_day = min(day, last_day)
+    return datetime(year, month, safe_day)
+
+
 async def _send_recurring_category(callback: CallbackQuery, session: AsyncSession, category: str) -> None:
-    expenses = await get_company_recurring_by_category(session, category)
+    templates = await get_company_recurring_by_category(session, category)
     token = _encode_token(category)
 
-    if not expenses:
+    if not templates:
         await send_new_message(
             callback,
-            f"♻️ <b>{category}</b>\n\nЗаписей нет.",
+            f"♻️ <b>{category}</b>\n\nАктивных шаблонов нет.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -252,26 +285,31 @@ async def _send_recurring_category(callback: CallbackQuery, session: AsyncSessio
         )
         return
 
-    total = sum(exp.amount for exp in expenses)
+    total = sum(exp.amount for exp in templates)
     lines = [
         f"♻️ <b>{category}</b>",
-        f"Всего: {format_currency(total)}",
+        f"Общая сумма: {format_currency(total)}",
         "",
-        "📄 Записи:",
+        "📄 Шаблоны:",
     ]
 
     keyboard = InlineKeyboardBuilder()
-    for exp in expenses:
-        period_str = f"{exp.period_month:02d}.{exp.period_year}"
-        user_name = _format_user_name(exp.user)
+    for exp in templates:
+        first_payment = _first_payment_date(exp.start_year, exp.start_month, exp.day_of_month)
+        end_label = (
+            f"до {exp.end_month:02d}.{exp.end_year}"
+            if exp.end_month and exp.end_year
+            else "бессрочно"
+        )
         lines.append(
-            f"\n• {period_str} — {format_currency(exp.amount)}\n"
-            f"  Добавил: {user_name}\n"
+            f"\n• {format_currency(exp.amount)} — {exp.day_of_month}-го числа\n"
+            f"  Старт: {first_payment.strftime('%d.%m.%Y')} ({end_label})\n"
+            f"  👤 { _format_user_name(exp.user) }\n"
             f"  {exp.description or '—'}"
         )
         keyboard.row(
             InlineKeyboardButton(
-                text=f"🗑 {period_str} • {format_currency(exp.amount)}",
+                text=f"🗑 {format_currency(exp.amount)} • {exp.day_of_month}-го",
                 callback_data=f"company:recurring:delete:{exp.id}:{token}"
             )
         )
@@ -285,6 +323,69 @@ async def _send_recurring_category(callback: CallbackQuery, session: AsyncSessio
         parse_mode="HTML",
         reply_markup=keyboard.as_markup(),
     )
+
+
+def _ensure_positive(amount: Decimal) -> bool:
+    try:
+        return Decimal(amount) > 0
+    except Exception:
+        return False
+
+
+def _format_rub(value: Decimal) -> str:
+    return format_currency(Decimal(value))
+
+
+async def _show_one_time_confirmation(sender: Sender, data: dict) -> None:
+    date_value = data.get("date")
+    try:
+        date_obj = datetime.strptime(date_value, "%Y-%m-%d")
+        date_label = date_obj.strftime("%d.%m.%Y")
+    except Exception:
+        date_label = date_value
+
+    lines = [
+        "✅ <b>Проверьте данные разового расхода</b>",
+        "",
+        f"📂 Категория: {data['category']}",
+        f"📅 Дата: {date_label}",
+        f"💰 Сумма: {_format_rub(data['amount'])}",
+        f"📝 Описание: {data['description'] or '—'}",
+    ]
+
+    await _reply(
+        sender,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=_one_time_confirm_keyboard(),
+    )
+
+
+async def _show_recurring_confirmation(sender: Sender, data: dict) -> None:
+    day = int(data['day_of_month'])
+    start_month = int(data['start_month'])
+    start_year = int(data['start_year'])
+    first_payment = _first_payment_date(start_year, start_month, day)
+
+    lines = [
+        "✅ <b>Проверьте данные ежемесячного расхода</b>",
+        "",
+        f"📂 Категория: {data['category']}",
+        f"💰 Ежемесячно: {_format_rub(data['amount'])}",
+        f"📅 День оплаты: {day}-го числа",
+        f"📆 Начало: {first_payment.strftime('%d.%m.%Y')}",
+        f"📝 Описание: {data['description'] or '—'}",
+    ]
+
+    await _reply(
+        sender,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=_recurring_confirm_keyboard(),
+    )
+
+
+# ===== Меню и навигация =====
 
 
 @router.message(F.text == "💼 Расходы фирмы")
@@ -314,6 +415,22 @@ async def company_menu_callback(callback: CallbackQuery, user: User, state: FSMC
         parse_mode="HTML",
         reply_markup=_company_menu_keyboard(),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:cancel")
+async def cancel_company_flow(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await send_new_message(
+        callback,
+        "❌ Действие отменено.",
+        reply_markup=_company_menu_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer("Отменено")
+
+
+# ===== Разовые расходы =====
 
 
 @router.callback_query(F.data == "company:one_time")
@@ -327,15 +444,165 @@ async def company_one_time_overview(callback: CallbackQuery, user: User, session
     await callback.answer()
 
 
-@router.callback_query(F.data == "company:recurring")
-async def company_recurring_overview(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+@router.callback_query(F.data == "company:one_time:add")
+async def company_add_one_time(callback: CallbackQuery, user: User, state: FSMContext):
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
 
-    await state.clear()
-    await _send_recurring_overview(callback, session)
+    await state.set_state(CompanyExpenseStates.waiting_input)
+    await state.update_data(flow="one_time")
+    await send_new_message(
+        callback,
+        "🆕 <b>Разовый расход</b>\n\nОпишите расход текстом или пришлите голосовое сообщение — ИИ заполнит карточку автоматически.",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
     await callback.answer()
+
+
+@router.message(CompanyExpenseStates.waiting_input, F.text)
+async def process_one_time_text(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    parsed = await parse_company_expense_text(message.text)
+
+    if not _ensure_positive(parsed["amount"]):
+        await message.answer(
+            "⚠️ Не удалось определить сумму. Попробуйте описать расход подробнее.",
+            reply_markup=get_cancel_button(),
+        )
+        return
+
+    await state.update_data(
+        category=parsed["category"].strip() or "Разовый расход",
+        amount=parsed["amount"],
+        date=parsed["date"],
+        description=parsed.get("description", "").strip(),
+    )
+    await state.set_state(CompanyExpenseStates.confirm)
+
+    await _show_one_time_confirmation(message, await state.get_data())
+
+
+@router.message(CompanyExpenseStates.waiting_input, F.voice)
+async def process_one_time_voice(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    await message.answer("🎤 Распознаю голос...")
+
+    try:
+        voice = message.voice
+        file = await message.bot.get_file(voice.file_id)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            tmp_path = tmp_file.name
+            await message.bot.download_file(file.file_path, tmp_path)
+
+        parsed = await parse_voice_company_expense(tmp_path, kind="one_time")
+        os.unlink(tmp_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Ошибка обработки голоса (company expense): {exc}")
+        await message.answer("❌ Не удалось распознать голос. Попробуйте ввести текстом.", reply_markup=get_cancel_button())
+        return
+
+    if not _ensure_positive(parsed["amount"]):
+        await message.answer(
+            "⚠️ Не удалось определить сумму. Попробуйте повторить голосовое сообщение или введите текстом.",
+            reply_markup=get_cancel_button(),
+        )
+        return
+
+    await state.update_data(
+        category=parsed["category"].strip() or "Разовый расход",
+        amount=parsed["amount"],
+        date=parsed["date"],
+        description=parsed.get("description", "").strip(),
+    )
+    await state.set_state(CompanyExpenseStates.confirm)
+
+    await _show_one_time_confirmation(message, await state.get_data())
+
+
+@router.callback_query(F.data == "company:one_time:retry")
+async def retry_one_time(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyExpenseStates.waiting_input)
+    await send_new_message(
+        callback,
+        "📝 Попробуйте описать расход ещё раз:",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:one_time:date:today")
+async def set_one_time_today(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(date=datetime.utcnow().strftime("%Y-%m-%d"))
+    await _show_one_time_confirmation(callback, await state.get_data())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:one_time:date:yesterday")
+async def set_one_time_yesterday(callback: CallbackQuery, state: FSMContext):
+    yesterday = datetime.utcnow() - timedelta(days=1)
+    await state.update_data(date=yesterday.strftime("%Y-%m-%d"))
+    await _show_one_time_confirmation(callback, await state.get_data())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:one_time:date:manual")
+async def ask_one_time_date(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyExpenseStates.waiting_date_manual)
+    await send_new_message(
+        callback,
+        "📅 Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.message(CompanyExpenseStates.waiting_date_manual)
+async def set_one_time_manual_date(message: Message, state: FSMContext):
+    text = message.text.strip()
+    try:
+        parsed = datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        await message.answer("❌ Неверный формат. Используйте <code>ДД.ММ.ГГГГ</code>.", parse_mode="HTML")
+        return
+
+    await state.update_data(date=parsed.strftime("%Y-%m-%d"))
+    await state.set_state(CompanyExpenseStates.confirm)
+    await _show_one_time_confirmation(message, await state.get_data())
+
+
+@router.callback_query(F.data == "company:one_time:save")
+async def save_one_time_expense(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+
+    expense = await create_company_expense(
+        session=session,
+        category=data["category"],
+        amount=Decimal(data["amount"]),
+        date=datetime.strptime(data["date"], "%Y-%m-%d"),
+        description=data.get("description"),
+        added_by=user.id,
+    )
+
+    await create_company_expense_log(
+        session=session,
+        expense_type=ONE_TIME_LOG_TYPE,
+        entity_id=expense.id,
+        action="create",
+        description=f"Добавлен разовый расход {expense.category}: {_format_rub(expense.amount)}",
+        user_id=user.id,
+    )
+
+    await send_new_message(
+        callback,
+        "✅ Разовый расход добавлен.",
+        parse_mode="HTML",
+    )
+    await _send_one_time_overview(callback, session)
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data.startswith("company:one_time:category:"))
@@ -347,219 +614,6 @@ async def company_one_time_category(callback: CallbackQuery, user: User, session
     category = _decode_token(callback.data.split(":")[-1])
     await _send_one_time_category(callback, session, category)
     await callback.answer()
-
-
-@router.callback_query(F.data.startswith("company:recurring:category:"))
-async def company_recurring_category(callback: CallbackQuery, user: User, session: AsyncSession):
-    if user.role != UserRole.ADMIN:
-        await callback.answer("❌ Недостаточно прав", show_alert=True)
-        return
-
-    category = _decode_token(callback.data.split(":")[-1])
-    await _send_recurring_category(callback, session, category)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "company:one_time:add")
-async def company_add_one_time(callback: CallbackQuery, user: User, state: FSMContext):
-    if user.role != UserRole.ADMIN:
-        await callback.answer("❌ Недостаточно прав", show_alert=True)
-        return
-
-    await state.set_state(CompanyExpenseStates.choosing_category)
-    await state.update_data(flow="one_time")
-    await send_new_message(
-        callback,
-        "🆕 <b>Разовый расход</b>\n\nВведите категорию (например: 'Офис', 'Налоги').",
-        parse_mode="HTML",
-        reply_markup=get_cancel_button(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "company:recurring:add")
-async def company_add_recurring(callback: CallbackQuery, user: User, state: FSMContext):
-    if user.role != UserRole.ADMIN:
-        await callback.answer("❌ Недостаточно прав", show_alert=True)
-        return
-
-    await state.set_state(CompanyRecurringExpenseStates.choosing_category)
-    await state.update_data(flow="recurring")
-    await send_new_message(
-        callback,
-        "🆕 <b>Ежемесячный расход</b>\n\nВведите категорию (например: 'Аренда', 'Зарплаты').",
-        parse_mode="HTML",
-        reply_markup=get_cancel_button(),
-    )
-    await callback.answer()
-
-
-@router.message(CompanyExpenseStates.choosing_category)
-async def process_one_time_category(message: Message, state: FSMContext):
-    category = message.text.strip()
-    if not category:
-        await message.answer("⚠️ Категория не может быть пустой. Попробуйте снова.")
-        return
-
-    await state.update_data(category=category)
-    await state.set_state(CompanyExpenseStates.waiting_amount)
-    await message.answer(
-        "Введите сумму (например: 25000)",
-        reply_markup=get_cancel_button(),
-    )
-
-
-@router.message(CompanyExpenseStates.waiting_amount)
-async def process_one_time_amount(message: Message, state: FSMContext):
-    try:
-        amount = Decimal(message.text.replace(" ", "").replace(",", "."))
-        if amount <= 0:
-            raise InvalidOperation
-    except (InvalidOperation, ValueError, AttributeError):
-        await message.answer("❌ Некорректная сумма. Пример: 25000")
-        return
-
-    await state.update_data(amount=amount)
-    await state.set_state(CompanyExpenseStates.waiting_date)
-    await message.answer(
-        "Введите дату расхода в формате <code>ДД.ММ.ГГГГ</code> (по умолчанию сегодня)",
-        parse_mode="HTML",
-        reply_markup=get_cancel_button(),
-    )
-
-
-@router.message(CompanyExpenseStates.waiting_date)
-async def process_one_time_date(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if not text:
-        date = datetime.utcnow()
-    else:
-        try:
-            date = datetime.strptime(text, "%d.%m.%Y")
-        except ValueError:
-            await message.answer("❌ Неверная дата. Используйте формат ДД.ММ.ГГГГ")
-            return
-
-    await state.update_data(date=date)
-    await state.set_state(CompanyExpenseStates.waiting_description)
-    await message.answer(
-        "Добавьте описание или отправьте '-' для пропуска.",
-        reply_markup=get_cancel_button(),
-    )
-
-
-@router.message(CompanyExpenseStates.waiting_description)
-async def finalize_one_time(message: Message, user: User, session: AsyncSession, state: FSMContext):
-    data = await state.get_data()
-    category = data.get("category")
-    amount: Decimal = data.get("amount")
-    date: datetime = data.get("date")
-    description_input = message.text.strip()
-    description = None if description_input == "-" else description_input
-
-    expense = await create_company_expense(
-        session=session,
-        category=category,
-        amount=amount,
-        date=date,
-        description=description,
-        added_by=user.id,
-    )
-
-    await create_company_expense_log(
-        session=session,
-        expense_type=ONE_TIME_LOG_TYPE,
-        entity_id=expense.id,
-        action="create",
-        description=f"Добавлен расход {category}: {format_currency(amount)}",
-        user_id=user.id,
-    )
-
-    await state.clear()
-    await message.answer(
-        "✅ Разовый расход добавлен.",
-        parse_mode="HTML",
-    )
-    await _send_one_time_overview(message, session)
-
-
-@router.message(CompanyRecurringExpenseStates.choosing_category)
-async def process_recurring_category(message: Message, state: FSMContext):
-    category = message.text.strip()
-    if not category:
-        await message.answer("⚠️ Категория не может быть пустой. Попробуйте снова.")
-        return
-
-    await state.update_data(category=category)
-    await state.set_state(CompanyRecurringExpenseStates.waiting_amount)
-    await message.answer("Введите сумму (например: 40000)", reply_markup=get_cancel_button())
-
-
-@router.message(CompanyRecurringExpenseStates.waiting_amount)
-async def process_recurring_amount(message: Message, state: FSMContext):
-    try:
-        amount = Decimal(message.text.replace(" ", "").replace(",", "."))
-        if amount <= 0:
-            raise InvalidOperation
-    except (InvalidOperation, ValueError, AttributeError):
-        await message.answer("❌ Некорректная сумма. Пример: 40000")
-        return
-
-    await state.update_data(amount=amount)
-    await state.set_state(CompanyRecurringExpenseStates.waiting_period)
-    await message.answer(
-        "Введите месяц и год в формате <code>ММ.ГГГГ</code>",
-        parse_mode="HTML",
-        reply_markup=get_cancel_button(),
-    )
-
-
-@router.message(CompanyRecurringExpenseStates.waiting_period)
-async def process_recurring_period(message: Message, state: FSMContext):
-    text = message.text.strip()
-    try:
-        period = datetime.strptime(text, "%m.%Y")
-    except ValueError:
-        await message.answer("❌ Неверный формат. Используйте ММ.ГГГГ")
-        return
-
-    await state.update_data(period_month=period.month, period_year=period.year)
-    await state.set_state(CompanyRecurringExpenseStates.waiting_description)
-    await message.answer("Добавьте описание или отправьте '-' для пропуска.", reply_markup=get_cancel_button())
-
-
-@router.message(CompanyRecurringExpenseStates.waiting_description)
-async def finalize_recurring(message: Message, user: User, session: AsyncSession, state: FSMContext):
-    data = await state.get_data()
-    category = data.get("category")
-    amount: Decimal = data.get("amount")
-    month = data.get("period_month")
-    year = data.get("period_year")
-    description_input = message.text.strip()
-    description = None if description_input == "-" else description_input
-
-    expense = await create_company_recurring_expense(
-        session=session,
-        category=category,
-        amount=amount,
-        period_month=month,
-        period_year=year,
-        description=description,
-        added_by=user.id,
-    )
-
-    await create_company_expense_log(
-        session=session,
-        expense_type=RECURRING_LOG_TYPE,
-        entity_id=expense.id,
-        action="create",
-        description=f"Добавлен ежемесячный расход {category}: {format_currency(amount)} за {month:02d}.{year}",
-        user_id=user.id,
-    )
-
-    await state.clear()
-    await message.answer("✅ Ежемесячный расход добавлен.", parse_mode="HTML")
-    await _send_recurring_overview(message, session)
 
 
 @router.callback_query(F.data.startswith("company:one_time:delete:"))
@@ -589,6 +643,211 @@ async def delete_one_time(callback: CallbackQuery, user: User, session: AsyncSes
 
     await _send_one_time_category(callback, session, category)
     await callback.answer("🗑 Удалено")
+
+
+# ===== Ежемесячные расходы =====
+
+
+@router.callback_query(F.data == "company:recurring")
+async def company_recurring_overview(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    await state.clear()
+    await _send_recurring_overview(callback, session)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:recurring:add")
+async def company_add_recurring(callback: CallbackQuery, user: User, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    await state.set_state(CompanyRecurringExpenseStates.waiting_input)
+    await state.update_data(flow="recurring")
+    await send_new_message(
+        callback,
+        "🆕 <b>Ежемесячный расход</b>\n\nОпишите платеж текстом или голосом. Укажите сумму и, по возможности, дату/день оплаты.",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+async def _store_recurring_data(state: FSMContext, parsed: dict) -> None:
+    start_dt = datetime.strptime(parsed["start_date"], "%Y-%m-%d")
+    day = max(1, min(int(parsed["day_of_month"]), 31))
+
+    await state.update_data(
+        category=parsed["category"].strip() or "Ежемесячный расход",
+        amount=parsed["amount"],
+        day_of_month=day,
+        start_month=start_dt.month,
+        start_year=start_dt.year,
+        description=parsed.get("description", "").strip(),
+    )
+
+
+@router.message(CompanyRecurringExpenseStates.waiting_input, F.text)
+async def process_recurring_text(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    parsed = await parse_company_expense_text(message.text, kind="recurring")
+
+    if not _ensure_positive(parsed["amount"]):
+        await message.answer(
+            "⚠️ Не удалось определить сумму. Опишите платеж подробнее.",
+            reply_markup=get_cancel_button(),
+        )
+        return
+
+    await _store_recurring_data(state, parsed)
+    await state.set_state(CompanyRecurringExpenseStates.confirm)
+
+    await _show_recurring_confirmation(message, await state.get_data())
+
+
+@router.message(CompanyRecurringExpenseStates.waiting_input, F.voice)
+async def process_recurring_voice(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    await message.answer("🎤 Распознаю голос...")
+
+    try:
+        voice = message.voice
+        file = await message.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            tmp_path = tmp_file.name
+            await message.bot.download_file(file.file_path, tmp_path)
+
+        parsed = await parse_voice_company_expense(tmp_path, kind="recurring")
+        os.unlink(tmp_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Ошибка обработки голоса (company recurring): {exc}")
+        await message.answer("❌ Не удалось распознать голос. Попробуйте текстом.", reply_markup=get_cancel_button())
+        return
+
+    if not _ensure_positive(parsed["amount"]):
+        await message.answer(
+            "⚠️ Не удалось определить сумму. Попробуйте повторить голосовое сообщение или опишите текстом.",
+            reply_markup=get_cancel_button(),
+        )
+        return
+
+    await _store_recurring_data(state, parsed)
+    await state.set_state(CompanyRecurringExpenseStates.confirm)
+
+    await _show_recurring_confirmation(message, await state.get_data())
+
+
+@router.callback_query(F.data == "company:recurring:retry")
+async def retry_recurring(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyRecurringExpenseStates.waiting_input)
+    await send_new_message(
+        callback,
+        "📝 Опишите ежемесячный расход ещё раз:",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "company:recurring:day")
+async def ask_recurring_day(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyRecurringExpenseStates.waiting_day_manual)
+    await send_new_message(
+        callback,
+        "📅 Введите день месяца (1-31), когда оплачивается расход.",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.message(CompanyRecurringExpenseStates.waiting_day_manual)
+async def set_recurring_day(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("❌ Введите число от 1 до 31.")
+        return
+
+    day = max(1, min(int(text), 31))
+    await state.update_data(day_of_month=day)
+    await state.set_state(CompanyRecurringExpenseStates.confirm)
+
+    await _show_recurring_confirmation(message, await state.get_data())
+
+
+@router.callback_query(F.data == "company:recurring:start")
+async def ask_recurring_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyRecurringExpenseStates.waiting_start_manual)
+    await send_new_message(
+        callback,
+        "📆 Укажите месяц начала в формате <code>ММ.ГГГГ</code>.",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.message(CompanyRecurringExpenseStates.waiting_start_manual)
+async def set_recurring_start(message: Message, state: FSMContext):
+    text = message.text.strip()
+    try:
+        parsed = datetime.strptime(text, "%m.%Y")
+    except ValueError:
+        await message.answer("❌ Неверный формат. Используйте <code>ММ.ГГГГ</code>.", parse_mode="HTML")
+        return
+
+    await state.update_data(start_month=parsed.month, start_year=parsed.year)
+    await state.set_state(CompanyRecurringExpenseStates.confirm)
+
+    await _show_recurring_confirmation(message, await state.get_data())
+
+
+@router.callback_query(F.data == "company:recurring:save")
+async def save_recurring_expense(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+
+    expense = await create_company_recurring_expense(
+        session=session,
+        category=data["category"],
+        amount=Decimal(data["amount"]),
+        day_of_month=int(data["day_of_month"]),
+        start_month=int(data["start_month"]),
+        start_year=int(data["start_year"]),
+        description=data.get("description"),
+        added_by=user.id,
+    )
+
+    await create_company_expense_log(
+        session=session,
+        expense_type=RECURRING_LOG_TYPE,
+        entity_id=expense.id,
+        action="create",
+        description=(
+            f"Добавлен ежемесячный расход {expense.category}: {_format_rub(expense.amount)} "
+            f"каждого {expense.day_of_month}-го"
+        ),
+        user_id=user.id,
+    )
+
+    await send_new_message(
+        callback,
+        "✅ Ежемесячный расход добавлен.",
+        parse_mode="HTML",
+    )
+    await _send_recurring_overview(callback, session)
+    await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("company:recurring:category:"))
+async def company_recurring_category(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    category = _decode_token(callback.data.split(":")[-1])
+    await _send_recurring_category(callback, session, category)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("company:recurring:delete:"))

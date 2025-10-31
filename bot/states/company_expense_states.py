@@ -3,14 +3,13 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class CompanyExpenseStates(StatesGroup):
-    choosing_category = State()
-    waiting_amount = State()
-    waiting_date = State()
-    waiting_description = State()
+    waiting_input = State()
+    confirm = State()
+    waiting_date_manual = State()
 
 
 class CompanyRecurringExpenseStates(StatesGroup):
-    choosing_category = State()
-    waiting_amount = State()
-    waiting_period = State()
-    waiting_description = State()
+    waiting_input = State()
+    confirm = State()
+    waiting_day_manual = State()
+    waiting_start_manual = State()

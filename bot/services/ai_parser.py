@@ -225,3 +225,113 @@ async def parse_voice_advance(file_path: str) -> Dict:
     return await parse_advance_text(text)
 
 
+async def parse_company_expense_text(text: str, kind: str = "one_time") -> Dict:
+    now = datetime.now()
+
+    if kind == "one_time":
+        system_prompt = f"""Ты помощник, который извлекает данные о разовом корпоративном расходе.
+Из текста нужно получить:
+1. Категорию (category) — короткое название вида расхода (например: "Аренда", "Налоги").
+2. Сумму (amount) — число в рублях без разделителей.
+3. Дату (date) — в формате YYYY-MM-DD. Если дата не указана, используй сегодняшнюю: {now.strftime('%Y-%m-%d')}.
+4. Описание (description) — краткое примечание. Если его нет, сформулируй по содержанию.
+
+Верни СТРОГО JSON:
+{{"category": "строка", "amount": число, "date": "YYYY-MM-DD", "description": "строка"}}
+"""
+    else:
+        system_prompt = f"""Ты помощник, который извлекает данные о ежемесячном корпоративном расходе.
+Из текста нужно получить:
+1. Категорию (category) — короткое название расхода.
+2. Сумму (amount) — размер ежемесячного платежа в рублях.
+3. День месяца оплаты (day_of_month) — число от 1 до 31. Если не указано, используй день из даты начала.
+4. Дату начала (start_date) — когда расход вступает в силу, формат YYYY-MM-DD. Если дата не указана, возьми первый день текущего месяца {now.strftime('%Y-%m-01')}.
+5. Описание (description) — краткое примечание.
+
+Верни СТРОГО JSON:
+{{"category": "строка", "amount": число, "day_of_month": число, "start_date": "YYYY-MM-DD", "description": "строка"}}
+"""
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.1,
+            max_tokens=200,
+        )
+
+        result_text = response.choices[0].message.content.strip()
+
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(result_text)
+
+        if kind == "one_time":
+            return {
+                "category": data.get("category", "Общий расход"),
+                "amount": Decimal(str(data.get("amount", 0))),
+                "date": data.get("date", now.strftime("%Y-%m-%d")),
+                "description": data.get("description", text[:120]),
+            }
+
+        day_value = int(data.get("day_of_month", now.day) or now.day)
+        day_value = max(1, min(day_value, 31))
+        start_date = data.get("start_date", now.strftime("%Y-%m-01"))
+
+        return {
+            "category": data.get("category", "Ежемесячный расход"),
+            "amount": Decimal(str(data.get("amount", 0))),
+            "day_of_month": day_value,
+            "start_date": start_date,
+            "description": data.get("description", text[:120]),
+        }
+
+    except Exception as e:
+        print(f"❌ Ошибка парсинга корпоративного расхода: {e}")
+
+        if kind == "one_time":
+            return {
+                "category": "Общий расход",
+                "amount": Decimal(0),
+                "date": now.strftime("%Y-%m-%d"),
+                "description": text[:120],
+            }
+
+        return {
+            "category": "Ежемесячный расход",
+            "amount": Decimal(0),
+            "day_of_month": now.day,
+            "start_date": now.strftime("%Y-%m-01"),
+            "description": text[:120],
+        }
+
+
+async def parse_voice_company_expense(file_path: str, kind: str = "one_time") -> Dict:
+    text = await transcribe_voice(file_path)
+
+    if not text:
+        if kind == "one_time":
+            return {
+                "category": "Общий расход",
+                "amount": Decimal(0),
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "description": "Ошибка распознавания голоса",
+            }
+
+        return {
+            "category": "Ежемесячный расход",
+            "amount": Decimal(0),
+            "day_of_month": datetime.now().day,
+            "start_date": datetime.now().strftime("%Y-%m-01"),
+            "description": "Ошибка распознавания голоса",
+        }
+
+    return await parse_company_expense_text(text, kind)
+
+

@@ -2,6 +2,7 @@
 Обработчики для генерации отчетов
 """
 from datetime import datetime, timedelta
+import calendar
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
@@ -13,11 +14,14 @@ from database.crud import (
     get_object_by_id,
     get_files_by_object,
     get_objects_by_period,
-    get_company_expenses_for_period
+    get_company_expenses_for_period,
+    get_financial_years,
 )
 from bot.keyboards.reports_kb import (
     get_period_selection,
-    get_completed_objects_list
+    get_completed_objects_list,
+    get_years_keyboard,
+    get_months_keyboard,
 )
 from bot.states.expense_states import ReportPeriodStates
 from bot.services.report_generator import (
@@ -28,6 +32,11 @@ from bot.utils.messaging import delete_message, send_new_message
 from bot.keyboards.main_menu import get_cancel_button
 
 router = Router()
+
+MONTH_NAMES = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
 
 
 @router.callback_query(F.data == "report:object")
@@ -112,120 +121,103 @@ async def select_report_period(callback: CallbackQuery, user: User, state: FSMCo
 
 
 @router.callback_query(F.data == "report:period:year")
-async def report_period_year(callback: CallbackQuery, user: User, state: FSMContext):
-    """Запрос года для отчета"""
-    
+async def report_period_year(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Выбор года для отчета"""
+
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-    
-    await state.set_state(ReportPeriodStates.waiting_year)
-    
-    current_year = datetime.now().year
-    
+
+    years = await get_financial_years(session)
+    if not years:
+        years = [datetime.utcnow().year]
+
     await send_new_message(
         callback,
-        f"📅 <b>Отчёт за год</b>\n\n"
-        f"Укажите год (например, {current_year}):",
+        "📅 <b>Отчёт за год</b>\n\nВыберите год:",
         parse_mode="HTML",
-        reply_markup=get_cancel_button(),
+        reply_markup=get_years_keyboard(years, "report:period:year", "report:period"),
     )
     await callback.answer()
 
 
-@router.message(ReportPeriodStates.waiting_year)
-async def process_year(message: Message, user: User, session: AsyncSession, state: FSMContext):
-    """Обработка года и генерация отчета"""
-    
-    try:
-        year = int(message.text.strip())
-        if year < 2000 or year > 2100:
-            raise ValueError
-    except:
-        await message.answer(
-            "❌ Неверный формат года. Введите год числом (например: 2025):"
-        )
+@router.callback_query(F.data.startswith("report:period:year:"))
+async def generate_year_report(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-    
-    await state.clear()
-    
-    # Определяем период
+
+    parts = callback.data.split(":")
+    year = int(parts[3])
+
     start_date = datetime(year, 1, 1)
     end_date = datetime(year, 12, 31, 23, 59, 59)
-    
-    # Получаем объекты за период
-    objects = await get_objects_by_period(session, start_date, end_date)
-    
-    # Генерируем отчет
-    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
 
+    objects = await get_objects_by_period(session, start_date, end_date)
+    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
     report = generate_period_report(objects, f"{year} год", company_totals)
-    
-    await message.answer(report, parse_mode="HTML")
+
+    await send_new_message(callback, report, parse_mode="HTML")
+    await callback.answer("✅ Отчёт готов")
 
 
 @router.callback_query(F.data == "report:period:month")
-async def report_period_month(callback: CallbackQuery, user: User, state: FSMContext):
-    """Запрос месяца для отчета"""
-    
+async def report_period_month(callback: CallbackQuery, user: User, session: AsyncSession):
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-    
-    await state.set_state(ReportPeriodStates.waiting_month)
-    
-    current_date = datetime.now()
-    
+
+    years = await get_financial_years(session)
+    if not years:
+        years = [datetime.utcnow().year]
+
     await send_new_message(
         callback,
-        f"📅 <b>Отчёт за месяц</b>\n\n"
-        f"Введите месяц и год в формате <code>ММ.ГГГГ</code>\n"
-        f"Например: <code>{current_date.strftime('%m.%Y')}</code>",
+        "📅 <b>Отчёт за месяц</b>\n\nВыберите год:",
         parse_mode="HTML",
-        reply_markup=get_cancel_button(),
+        reply_markup=get_years_keyboard(years, "report:period:month:year", "report:period"),
     )
     await callback.answer()
 
 
-@router.message(ReportPeriodStates.waiting_month)
-async def process_month(message: Message, user: User, session: AsyncSession, state: FSMContext):
-    """Обработка месяца и генерация отчета"""
-    
-    try:
-        date_obj = datetime.strptime(message.text.strip(), "%m.%Y")
-    except:
-        await message.answer(
-            "❌ Неверный формат. Введите в формате <code>ММ.ГГГГ</code> (например: 10.2025):",
-            parse_mode="HTML"
-        )
+@router.callback_query(F.data.startswith("report:period:month:year:"))
+async def select_month_for_year(callback: CallbackQuery, user: User):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-    
-    await state.clear()
-    
-    # Определяем период (весь месяц)
-    start_date = date_obj.replace(day=1, hour=0, minute=0, second=0)
-    
-    # Последний день месяца
-    if date_obj.month == 12:
-        end_date = date_obj.replace(year=date_obj.year + 1, month=1, day=1) - timedelta(seconds=1)
-    else:
-        end_date = date_obj.replace(month=date_obj.month + 1, day=1) - timedelta(seconds=1)
-    
-    # Получаем объекты за период
-    objects = await get_objects_by_period(session, start_date, end_date)
-    
-    # Генерируем отчет
-    month_names = [
-        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
-    ]
-    month_name = month_names[date_obj.month - 1]
-    
-    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
 
-    report = generate_period_report(objects, f"{month_name} {date_obj.year}", company_totals)
-    
-    await message.answer(report, parse_mode="HTML")
+    parts = callback.data.split(":")
+    year = int(parts[4])
+
+    await send_new_message(
+        callback,
+        f"📅 <b>{year}</b> — выберите месяц:",
+        parse_mode="HTML",
+        reply_markup=get_months_keyboard(year, "report:period:month:select", "report:period:month"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report:period:month:select:"))
+async def generate_month_report(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    year = int(parts[4])
+    month = int(parts[5])
+
+    start_date = datetime(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    end_date = datetime(year, month, last_day, 23, 59, 59)
+
+    objects = await get_objects_by_period(session, start_date, end_date)
+    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
+    report = generate_period_report(objects, f"{MONTH_NAMES[month - 1]} {year}", company_totals)
+
+    await send_new_message(callback, report, parse_mode="HTML")
+    await callback.answer("✅ Отчёт готов")
 
 
 @router.callback_query(F.data == "report:period:range")

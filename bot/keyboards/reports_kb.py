@@ -40,6 +40,30 @@ def get_period_selection() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def get_years_keyboard(years: List[int], callback_prefix: str, back_callback: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for year in years:
+        builder.button(text=str(year), callback_data=f"{callback_prefix}:{year}")
+    if years:
+        builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback))
+    return builder.as_markup()
+
+
+def get_months_keyboard(year: int, callback_prefix: str, back_callback: str) -> InlineKeyboardMarkup:
+    months = [
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+    ]
+
+    builder = InlineKeyboardBuilder()
+    for idx, name in enumerate(months, start=1):
+        builder.button(text=name, callback_data=f"{callback_prefix}:{year}:{idx:02d}")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback))
+    return builder.as_markup()
+
+
 def get_completed_objects_list(objects: List[ConstructionObject]) -> InlineKeyboardMarkup:
     """
     Список завершенных объектов для отчета
@@ -68,5 +92,6 @@ def get_completed_objects_list(objects: List[ConstructionObject]) -> InlineKeybo
     )
     
     return builder.as_markup()
+
 
 

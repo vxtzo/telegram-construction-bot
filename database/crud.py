@@ -4,9 +4,11 @@ CRUD операции для работы с базой данных
 from typing import Optional, List
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import select, update, delete, and_, or_, func
+import logging
+from sqlalchemy import select, update, delete, and_, or_, func, text, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import ProgrammingError
 
 from database.models import (
     User, UserRole, ConstructionObject, ObjectStatus,
@@ -14,6 +16,9 @@ from database.models import (
     PaymentSource, CompensationStatus, ObjectLog, ObjectLogType,
     CompanyExpense, CompanyRecurringExpense, CompanyExpenseLog
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============ USER CRUD ============
@@ -554,16 +559,22 @@ async def create_company_recurring_expense(
     session: AsyncSession,
     category: str,
     amount: Decimal,
-    period_month: int,
-    period_year: int,
+    day_of_month: int,
+    start_month: int,
+    start_year: int,
     description: Optional[str],
     added_by: Optional[int],
+    end_month: Optional[int] = None,
+    end_year: Optional[int] = None,
 ) -> CompanyRecurringExpense:
     expense = CompanyRecurringExpense(
         category=category.strip(),
         amount=amount,
-        period_month=period_month,
-        period_year=period_year,
+        day_of_month=max(1, min(day_of_month, 31)),
+        start_month=start_month,
+        start_year=start_year,
+        end_month=end_month,
+        end_year=end_year,
         description=description.strip() if description else None,
         added_by=added_by,
     )
@@ -606,29 +617,149 @@ async def get_company_expenses_by_category(session: AsyncSession, category: str)
         select(CompanyExpense)
         .where(CompanyExpense.category == category)
         .order_by(CompanyExpense.date.desc())
+        .options(selectinload(CompanyExpense.user))
     )
     return list(result.scalars().all())
 
 
+async def _ensure_company_recurring_schema(session: AsyncSession) -> None:
+    def _get_columns(sync_connection) -> set[str]:
+        inspector = inspect(sync_connection)
+        if not inspector.has_table('company_recurring_expenses'):
+            return set()
+        return {col['name'] for col in inspector.get_columns('company_recurring_expenses')}
+
+    try:
+        columns = await session.run_sync(_get_columns)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to inspect company_recurring_expenses: %s", exc)
+        return
+
+    if not columns:
+        return
+
+    statements: list[str] = []
+
+    if 'period_month' in columns and 'start_month' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses RENAME COLUMN period_month TO start_month')
+        columns.remove('period_month')
+        columns.add('start_month')
+
+    if 'period_year' in columns and 'start_year' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses RENAME COLUMN period_year TO start_year')
+        columns.remove('period_year')
+        columns.add('start_year')
+
+    if 'day_of_month' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN day_of_month INTEGER NOT NULL DEFAULT 1')
+        statements.append('ALTER TABLE company_recurring_expenses ALTER COLUMN day_of_month DROP DEFAULT')
+        columns.add('day_of_month')
+
+    if 'end_month' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN end_month INTEGER NULL')
+        columns.add('end_month')
+
+    if 'end_year' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN end_year INTEGER NULL')
+        columns.add('end_year')
+
+    if 'is_active' not in columns:
+        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE')
+        statements.append('UPDATE company_recurring_expenses SET is_active = TRUE WHERE is_active IS NULL')
+        statements.append('ALTER TABLE company_recurring_expenses ALTER COLUMN is_active DROP DEFAULT')
+        columns.add('is_active')
+
+    if statements:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def get_company_recurring_categories(session: AsyncSession) -> List[tuple[str, Decimal, int]]:
-    result = await session.execute(
+    await _ensure_company_recurring_schema(session)
+
+    query = (
         select(
             CompanyRecurringExpense.category,
             func.sum(CompanyRecurringExpense.amount),
             func.count(CompanyRecurringExpense.id),
-        ).group_by(CompanyRecurringExpense.category)
+        )
+        .group_by(CompanyRecurringExpense.category)
         .order_by(func.sum(CompanyRecurringExpense.amount).desc())
     )
+
+    try:
+        query = query.where(CompanyRecurringExpense.is_active == True)  # noqa: E712
+        result = await session.execute(query)
+    except ProgrammingError as exc:  # column might not exist in legacy DB
+        logger.warning("is_active column missing, falling back without filter: %s", exc)
+        await session.rollback()
+        result = await session.execute(
+            select(
+                CompanyRecurringExpense.category,
+                func.sum(CompanyRecurringExpense.amount),
+                func.count(CompanyRecurringExpense.id),
+            )
+            .group_by(CompanyRecurringExpense.category)
+            .order_by(func.sum(CompanyRecurringExpense.amount).desc())
+        )
+
     return [(row[0], Decimal(row[1]), row[2]) for row in result.all()]
 
 
 async def get_company_recurring_by_category(session: AsyncSession, category: str) -> List[CompanyRecurringExpense]:
-    result = await session.execute(
+    await _ensure_company_recurring_schema(session)
+
+    query = (
         select(CompanyRecurringExpense)
         .where(CompanyRecurringExpense.category == category)
-        .order_by(CompanyRecurringExpense.period_year.desc(), CompanyRecurringExpense.period_month.desc())
+        .options(selectinload(CompanyRecurringExpense.user))
     )
-    return list(result.scalars().all())
+
+    try:
+        query = query.where(CompanyRecurringExpense.is_active == True)  # noqa: E712
+        query = query.order_by(
+            CompanyRecurringExpense.start_year.desc(),
+            CompanyRecurringExpense.start_month.desc(),
+            CompanyRecurringExpense.day_of_month.asc(),
+        )
+        result = await session.execute(query)
+        return list(result.scalars().all())
+    except ProgrammingError as exc:
+        logger.warning("Legacy recurring expense schema detected: %s", exc)
+        await session.rollback()
+
+    raw_result = await session.execute(
+        text(
+            """
+            SELECT id, category, amount, description, period_month, period_year, created_at, added_by
+            FROM company_recurring_expenses
+            WHERE category = :category
+            ORDER BY period_year DESC, period_month DESC
+            """
+        ),
+        {"category": category},
+    )
+
+    items = []
+    for row in raw_result.mappings():
+        dummy = CompanyRecurringExpense(
+            id=row["id"],
+            category=row["category"],
+            amount=row["amount"],
+            description=row["description"],
+            start_month=row["period_month"],
+            start_year=row["period_year"],
+            day_of_month=1,
+            end_month=None,
+            end_year=None,
+            is_active=True,
+            added_by=row["added_by"],
+        )
+        dummy.created_at = row["created_at"]
+        items.append(dummy)
+
+    return items
 
 
 async def get_company_expenses_for_period(
@@ -637,27 +768,111 @@ async def get_company_expenses_for_period(
     end_date: datetime,
 ) -> dict:
     one_time_query = await session.execute(
-        select(func.sum(CompanyExpense.amount)).where(
+        select(func.coalesce(func.sum(CompanyExpense.amount), 0)).where(
             and_(CompanyExpense.date >= start_date, CompanyExpense.date <= end_date)
         )
     )
-    one_time_total = one_time_query.scalar() or 0
+    one_time_total = Decimal(one_time_query.scalar() or 0)
 
-    recurring_query = await session.execute(
-        select(func.sum(CompanyRecurringExpense.amount)).where(
-            and_(
-                CompanyRecurringExpense.period_year * 100 + CompanyRecurringExpense.period_month >= start_date.year * 100 + start_date.month,
-                CompanyRecurringExpense.period_year * 100 + CompanyRecurringExpense.period_month <= end_date.year * 100 + end_date.month,
+    await _ensure_company_recurring_schema(session)
+
+    try:
+        recurring_result = await session.execute(
+            select(CompanyRecurringExpense).where(CompanyRecurringExpense.is_active == True)  # noqa: E712
+        )
+        templates = recurring_result.scalars().all()
+    except ProgrammingError as exc:
+        logger.warning("Legacy recurring expense schema detected during totals: %s", exc)
+        await session.rollback()
+        recurring_result = await session.execute(
+            text(
+                """
+                SELECT id, amount, period_month, period_year
+                FROM company_recurring_expenses
+                """
             )
         )
-    )
-    recurring_total = recurring_query.scalar() or 0
+
+        recurring_total = Decimal(0)
+        for row in recurring_result.fetchall():
+            period_month = row["period_month"]
+            period_year = row["period_year"]
+            template_start = period_year * 12 + period_month
+            period_start = start_date.year * 12 + start_date.month
+            period_end = end_date.year * 12 + end_date.month
+            first_month = max(template_start, period_start)
+            last_month = period_end
+            if first_month > last_month:
+                continue
+            months_count = last_month - first_month + 1
+            recurring_total += Decimal(row["amount"]) * months_count
+
+        return {
+            "one_time": one_time_total,
+            "recurring": recurring_total,
+            "total": one_time_total + recurring_total,
+        }
+
+    period_start = start_date.year * 12 + start_date.month
+    period_end = end_date.year * 12 + end_date.month
+
+    recurring_total = Decimal(0)
+
+    for template in templates:
+        template_start = template.start_year * 12 + template.start_month
+        template_end = (
+            template.end_year * 12 + template.end_month
+            if template.end_year and template.end_month
+            else None
+        )
+
+        first_month = max(template_start, period_start)
+        last_month = min(template_end, period_end) if template_end else period_end
+
+        if first_month > last_month:
+            continue
+
+        months_count = last_month - first_month + 1
+        recurring_total += template.amount * months_count
 
     return {
-        "one_time": Decimal(one_time_total),
-        "recurring": Decimal(recurring_total),
-        "total": Decimal(one_time_total) + Decimal(recurring_total),
+        "one_time": one_time_total,
+        "recurring": recurring_total,
+        "total": one_time_total + recurring_total,
     }
+
+
+async def get_financial_years(session: AsyncSession) -> List[int]:
+    years: set[int] = set()
+
+    object_years = await session.execute(
+        select(func.extract("year", ConstructionObject.start_date)).where(ConstructionObject.start_date.isnot(None))
+    )
+    years.update(int(value) for value, in object_years if value is not None)
+
+    object_end_years = await session.execute(
+        select(func.extract("year", ConstructionObject.end_date)).where(ConstructionObject.end_date.isnot(None))
+    )
+    years.update(int(value) for value, in object_end_years if value is not None)
+
+    company_expense_years = await session.execute(
+        select(func.extract("year", CompanyExpense.date)).where(CompanyExpense.date.isnot(None))
+    )
+    years.update(int(value) for value, in company_expense_years if value is not None)
+
+    recurring_years = await session.execute(
+        select(CompanyRecurringExpense.start_year, CompanyRecurringExpense.end_year)
+    )
+    for start_year, end_year in recurring_years:
+        if start_year:
+            years.add(int(start_year))
+        if end_year:
+            years.add(int(end_year))
+
+    current_year = datetime.utcnow().year
+    years.add(current_year)
+
+    return sorted(years)
 
 
 async def create_company_expense_log(

@@ -217,23 +217,30 @@ class CompanyExpense(Base):
 
 
 class CompanyRecurringExpense(Base):
-    """Ежемесячные расходы компании"""
+    """Шаблоны ежемесячных расходов компании"""
 
     __tablename__ = "company_recurring_expenses"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     category: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    period_month: Mapped[int] = mapped_column(Integer, nullable=False)
-    period_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    day_of_month: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    start_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_month: Mapped[Optional[int]] = mapped_column(Integer)
+    end_year: Mapped[Optional[int]] = mapped_column(Integer)
     description: Mapped[Optional[str]] = mapped_column(Text)
     added_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     user: Mapped[Optional["User"]] = relationship("User")
 
     def __repr__(self):
-        return f"<CompanyRecurringExpense(id={self.id}, category='{self.category}', {self.period_month}.{self.period_year})>"
+        return (
+            f"<CompanyRecurringExpense(id={self.id}, category='{self.category}', "
+            f"day={self.day_of_month}, start={self.start_month:02d}.{self.start_year})>"
+        )
 
 
 class CompanyExpenseLog(Base):

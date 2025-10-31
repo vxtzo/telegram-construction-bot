@@ -1827,7 +1827,12 @@ async def confirm_delete_object(callback: CallbackQuery, user: User, session: As
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
 
-    object_id = int(callback.data.split(":")[3])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("❌ Некорректные данные", show_alert=True)
+        return
+
+    object_id = int(parts[2])
 
     success = await delete_object(session, object_id)
     if not success:
