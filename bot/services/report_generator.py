@@ -9,6 +9,30 @@ from database.models import ConstructionObject, File, FileType
 from bot.services.calculations import calculate_profit_data, format_currency, format_percentage
 
 
+def _currency(value: Decimal) -> str:
+    return format_currency(value).replace("₽", " ₽")
+
+
+def _percentage(value: Decimal) -> str:
+    return format_percentage(value).replace("%", " %")
+
+
+def _format_delta(value: Decimal) -> str:
+    if value > 0:
+        return f"🟩 +{_currency(value)}"
+    if value < 0:
+        return f"🟥 -{_currency(abs(value))}"
+    return f"⬜ {_currency(Decimal(0))}"
+
+
+def _format_positive(value: Decimal) -> str:
+    if value > 0:
+        return f"🟩 {_currency(value)}"
+    if value < 0:
+        return f"🟥 {_currency(abs(value))}"
+    return f"⬜ {_currency(Decimal(0))}"
+
+
 def generate_object_report(obj: ConstructionObject, files: List[File] = None) -> str:
     """
     Генерация текстового отчета по объекту
@@ -33,75 +57,96 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
     end_date = obj.end_date.strftime("%d.%m.%Y") if obj.end_date else "—"
     
     # Формируем отчет
-    report = f"""
-🏗️ ОБЪЕКТ: {obj.name}
-📍 Адрес: {obj.address or '—'}
-👷 Бригадир: {obj.foreman_name or '—'}
-📅 Период: {start_date} — {end_date}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    lines = [
+        f"🏗 ОБЪЕКТ: {obj.name}",
+        f"📍 Адрес: {obj.address or '—'}",
+        f"👷 Бригадир: {obj.foreman_name or '—'}",
+        f"📅 Период: {start_date} — {end_date}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "💸 ФИНАНСЫ",
+        "",
+        f"Предоплата: {_currency(data['prepayment'])}",
+        f"Окончательная оплата: {_currency(data['final_payment'])}",
+        f"💰 Всего поступлений: {_currency(data['total_income'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🧱 ОБЛИЦОВКА С3",
+        "",
+        f"По смете: {_currency(data['estimate_s3'])}",
+        f"Со скидкой: {_currency(data['actual_s3_discount'])}",
+        f"Разница: {_format_delta(data['s3_difference'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "⚒️ РАБОТЫ",
+        "",
+        f"По смете: {_currency(data['estimate_works'])}",
+        f"ФЗП мастера (45 %): {_currency(data['fzp_master'])}",
+        f"ФЗП бригадира (10 %): {_currency(data['fzp_foreman'])}",
+        f"Выдано на данный момент: {_currency(total_advances_amount)}",
+        f"Прибыль фирмы: {_format_positive(data['work_profit'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🧰 РАСХОДНИКИ",
+        "",
+        f"По смете: {_currency(data['estimate_supplies'])}",
+        f"Потрачено по факту: {_currency(data['supplies_fact'])}",
+        f"Разница: {_format_delta(data['supplies_difference'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "💰 НАКЛАДНЫЕ РАСХОДЫ",
+        "",
+        f"По смете: {_currency(data['estimate_overhead'])}",
+        f"Потрачено по факту: {_currency(data['overhead_fact'])}",
+        f"Разница: {_format_delta(data['overhead_difference'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🚚 ТРАНСПОРТНЫЕ УСЛУГИ",
+        "",
+        f"По смете: {_currency(data['estimate_transport'])}",
+        f"Потрачено по факту: {_currency(data['transport_fact'])}",
+        f"Разница: {_format_delta(data['transport_difference'])}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+        "📊 ИТОГОВЫЕ ПОКАЗАТЕЛИ",
+        "",
+        f"Общие доходы: {_currency(data['total_income'])}",
+        f"Общие расходы: {_currency(data['total_expenses'])}",
+        f"💰 Прибыль: {_format_positive(data['total_profit'])}",
+        f"📈 Рентабельность: {_percentage(data['profitability'])}",
+    ]
 
-💸 Финансы
-Предоплата: {format_currency(data['prepayment'])}
-Окончательная оплата: {format_currency(data['final_payment'])}
-Всего поступлений: {format_currency(data['total_income'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🧱 Облицовка С3
-По смете: {format_currency(data['estimate_s3'])}
-Со скидкой: {format_currency(data['actual_s3_discount'])}
-Разница: {format_currency(data['s3_difference'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚒ Работы
-По смете: {format_currency(data['estimate_works'])}
-ФЗП мастера (45%): {format_currency(data['fzp_master'])}
-ФЗП бригадира (10%): {format_currency(data['fzp_foreman'])}
-Выдано на данный момент: {format_currency(total_advances_amount)}
-Прибыль фирмы: {format_currency(data['work_profit'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🧰 Расходники
-По смете: {format_currency(data['estimate_supplies'])}
-Потрачено по факту: {format_currency(data['supplies_fact'])}
-Разница: {format_currency(data['supplies_difference'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💰 Накладные расходы
-По смете: {format_currency(data['estimate_overhead'])}
-Потрачено по факту: {format_currency(data['overhead_fact'])}
-Разница: {format_currency(data['overhead_difference'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🚚 Транспортные услуги
-По смете: {format_currency(data['estimate_transport'])}
-Потрачено по факту: {format_currency(data['transport_fact'])}
-Разница: {format_currency(data['transport_difference'])}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📊 Итоговые показатели
-Общие доходы: {format_currency(data['total_income'])}
-Общие расходы: {format_currency(data['total_expenses'])}
-💰 Прибыль: {format_currency(data['total_profit'])}
-📈 Рентабельность: {format_percentage(data['profitability'])}
-"""
-    
-    # Добавляем информацию о файлах, если есть
     if files:
-        report += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        report += "📎 Приложения:\n"
-        
-        photos = [f for f in files if f.file_type == FileType.PHOTO]
         receipts = [f for f in files if f.file_type == FileType.RECEIPT]
         docs = [f for f in files if f.file_type == FileType.DOCUMENT]
-        
-        if photos:
-            report += f"📷 Фото: {len(photos)} шт.\n"
+        photos = [f for f in files if f.file_type == FileType.PHOTO]
+
+        attachments = []
         if receipts:
-            report += f"🧾 Чеки: {len(receipts)} шт.\n"
+            attachments.append(f"🧾 Чеки: {len(receipts)} шт.")
         if docs:
-            report += f"📄 Документы: {len(docs)} шт.\n"
-    
-    return report.strip()
+            attachments.append(f"📄 Документы: {len(docs)} шт.")
+        if photos:
+            attachments.append(f"📷 Фото: {len(photos)} шт.")
+
+        if attachments:
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━",
+                "",
+                "📎 ПРИЛОЖЕНИЯ",
+                "",
+                *attachments,
+            ])
+
+    return "\n".join(lines).strip()
 
 
 def generate_short_object_card(obj: ConstructionObject) -> str:

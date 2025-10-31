@@ -34,7 +34,7 @@ async def admin_panel_menu(message: Message, user: User):
 /add_user <code>&lt;telegram_id&gt; &lt;role&gt;</code>
 Добавить нового пользователя
 Роли: admin, foreman
-Пример: <code>/add_user 123456789 foreman</code>
+Пример: <code>/add_user 123456789 foreman Иван Петров</code>
 
 /remove_user <code>&lt;telegram_id&gt;</code>
 Удалить пользователя
@@ -55,68 +55,65 @@ async def admin_panel_menu(message: Message, user: User):
 
 @router.message(Command("add_user"))
 async def cmd_add_user(message: Message, user: User, session: AsyncSession):
-    """
-    Добавить нового пользователя
-    
-    Формат: /add_user <telegram_id> <role>
-    """
-    
+    """Добавить или обновить пользователя (/add_user <telegram_id> <role> <ФИО>)"""
+
     if user.role != UserRole.ADMIN:
         await message.answer("❌ У вас нет прав для выполнения этой команды.")
         return
-    
-    # Парсим аргументы
+
     parts = message.text.split()
-    
-    if len(parts) < 3:
+
+    if len(parts) < 4:
         await message.answer(
             "❌ Неверный формат команды.\n\n"
-            "Использование: <code>/add_user &lt;telegram_id&gt; &lt;role&gt;</code>\n\n"
+            "Использование: <code>/add_user &lt;telegram_id&gt; &lt;role&gt; &lt;имя&gt;</code>\n\n"
             "Роли: admin, foreman\n"
-            "Пример: <code>/add_user 123456789 foreman</code>",
+            "Пример: <code>/add_user 123456789 foreman Иван Петров</code>",
             parse_mode="HTML"
         )
         return
-    
+
     try:
         telegram_id = int(parts[1])
-        role_str = parts[2].lower()
-        
-        if role_str not in ["admin", "foreman"]:
-            await message.answer(
-                "❌ Неверная роль. Доступные роли: admin, foreman"
-            )
-            return
-        
-        role = UserRole.ADMIN if role_str == "admin" else UserRole.FOREMAN
-        
     except ValueError:
-        await message.answer(
-            "❌ Telegram ID должен быть числом."
-        )
+        await message.answer("❌ Telegram ID должен быть числом.")
         return
-    
-    # Проверяем, существует ли пользователь
+
+    role_str = parts[2].lower()
+    if role_str not in ["admin", "foreman"]:
+        await message.answer("❌ Неверная роль. Доступные роли: admin, foreman")
+        return
+
+    role = UserRole.ADMIN if role_str == "admin" else UserRole.FOREMAN
+    full_name = " ".join(parts[3:]).strip()
+
+    if not full_name:
+        await message.answer("❌ Укажите имя пользователя после роли.")
+        return
+
     existing_user = await get_user_by_telegram_id(session, telegram_id)
-    
+
     if existing_user:
+        existing_user.role = role
+        existing_user.full_name = full_name
+        await session.commit()
         await message.answer(
-            f"❌ Пользователь с Telegram ID {telegram_id} уже существует.\n"
-            f"Имя: {existing_user.full_name or existing_user.username or 'не указано'}\n"
-            f"Роль: {existing_user.role.value}\n"
-            f"Статус: {'активен' if existing_user.is_active else 'заблокирован'}"
+            "♻️ Пользователь обновлён.\n\n"
+            f"Имя: {full_name}\n"
+            f"Роль: {role.value}"
         )
         return
-    
-    # Создаем пользователя
+
     new_user = await create_user(
         session=session,
         telegram_id=telegram_id,
-        role=role
+        role=role,
+        full_name=full_name
     )
-    
+
     await message.answer(
-        f"✅ Пользователь успешно добавлен!\n\n"
+        f"✅ Пользователь добавлен!\n\n"
+        f"Имя: {full_name}\n"
         f"Telegram ID: {telegram_id}\n"
         f"Роль: {role.value}\n\n"
         f"Пользователь может начать работу с ботом командой /start"
@@ -287,5 +284,6 @@ async def cmd_list_users(message: Message, user: User, session: AsyncSession):
     text += f"Всего пользователей: {len(users)}"
     
     await message.answer(text.strip(), parse_mode="HTML")
+
 
 
