@@ -2,7 +2,9 @@
 Генератор отчетов по объектам
 """
 from datetime import datetime
+from decimal import Decimal
 from typing import List
+
 from database.models import ConstructionObject, File, FileType
 from bot.services.calculations import calculate_profit_data, format_currency, format_percentage
 
@@ -21,6 +23,10 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
     
     # Рассчитываем все показатели
     data = calculate_profit_data(obj)
+    total_advances_amount = sum(
+        (advance.amount for advance in getattr(obj, "advances", [])),
+        Decimal(0)
+    )
     
     # Форматируем даты
     start_date = obj.start_date.strftime("%d.%m.%Y") if obj.start_date else "—"
@@ -50,6 +56,7 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
 По смете: {format_currency(data['estimate_works'])}
 ФЗП мастера (45%): {format_currency(data['fzp_master'])}
 ФЗП бригадира (10%): {format_currency(data['fzp_foreman'])}
+Выдано на данный момент: {format_currency(total_advances_amount)}
 Прибыль фирмы: {format_currency(data['work_profit'])}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -144,7 +151,6 @@ def generate_period_report(objects: List[ConstructionObject], period_str: str) -
         return f"📊 Отчет за {period_str}\n\nНет объектов за указанный период."
     
     # Считаем агрегированные показатели
-    from decimal import Decimal
     total_income = Decimal(0)
     total_profit = Decimal(0)
     total_expenses = Decimal(0)

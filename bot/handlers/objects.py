@@ -2,8 +2,10 @@
 Обработчики для просмотра объектов
 """
 import math
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import quote_plus, unquote_plus
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Message
@@ -41,7 +43,8 @@ router = Router()
 
 
 EXPENSES_PAGE_SIZE = 10
-ADVANCES_PAGE_SIZE = 10
+ADVANCES_WORK_PAGE_SIZE = 10
+UNSPECIFIED_WORK_TYPE_LABEL = "Без указания вида работ"
 
 
 EXPENSE_TYPE_ICONS = {
@@ -72,6 +75,36 @@ def _build_navigation_buttons(prefix: str, object_id: int, page: int, total_page
     if page < total_pages:
         buttons.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"{prefix}:{object_id}:{page + 1}"))
     return buttons
+
+
+def _build_worktype_navigation(prefix: str, object_id: int, page: int, total_pages: int, token: str) -> list[InlineKeyboardButton]:
+    buttons: list[InlineKeyboardButton] = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"{prefix}:{object_id}:{page - 1}:{token}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"{prefix}:{object_id}:{page + 1}:{token}"))
+    return buttons
+
+
+def _normalize_work_type(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _display_work_type(value: str | None) -> str:
+    cleaned = (value or "").strip()
+    return cleaned or UNSPECIFIED_WORK_TYPE_LABEL
+
+
+def _encode_work_type_token(value: str | None) -> str:
+    display = _display_work_type(value)
+    token = quote_plus(display, safe="")
+    return token or "-"
+
+
+def _decode_work_type_token(token: str | None) -> str:
+    if not token or token == "-":
+        return UNSPECIFIED_WORK_TYPE_LABEL
+    return unquote_plus(token)
 
 
 async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
@@ -148,16 +181,15 @@ async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, ob
     )
 
 
-async def _send_advances_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
+async def _send_advances_overview(callback: CallbackQuery, session: AsyncSession, object_id: int) -> None:
     obj = await get_object_by_id(session, object_id, load_relations=False)
     if not obj:
         await callback.answer("❌ Объект не найден", show_alert=True)
         return
 
     advances = await get_advances_by_object(session, object_id)
-    total = len(advances)
 
-    if total == 0:
+    if not advances:
         await send_new_message(
             callback,
             f"📄 <b>Авансы по объекту</b>\n\n🏗️ {obj.name}\n\nПока нет добавленных авансов.",
@@ -168,52 +200,184 @@ async def _send_advances_page(callback: CallbackQuery, session: AsyncSession, ob
         )
         return
 
-    total_pages = math.ceil(total / ADVANCES_PAGE_SIZE)
-    page = _normalize_page(page, total_pages)
-    start = (page - 1) * ADVANCES_PAGE_SIZE
-    current_items = advances[start:start + ADVANCES_PAGE_SIZE]
-    overall_total = sum(a.amount for a in advances)
+    overall_total = sum((advance.amount for advance in advances), Decimal(0))
+
+    grouped: dict[str, dict[str, object]] = {}
+    for advance in advances:
+        normalized = _normalize_work_type(advance.work_type)
+        display = _display_work_type(advance.work_type)
+        bucket = grouped.setdefault(
+            normalized,
+            {
+                "label": display,
+                "total": Decimal(0),
+                "count": 0,
+                "min_date": None,
+                "max_date": None,
+            }
+        )
+        bucket["total"] += advance.amount
+        bucket["count"] += 1
+        if advance.date:
+            if bucket["min_date"] is None or advance.date < bucket["min_date"]:
+                bucket["min_date"] = advance.date
+            if bucket["max_date"] is None or advance.date > bucket["max_date"]:
+                bucket["max_date"] = advance.date
+
+    groups = sorted(
+        grouped.values(),
+        key=lambda item: (item["label"].lower(), item["label"])
+    )
 
     lines = [
         "📄 <b>Авансы по объекту</b>",
         f"🏗️ {obj.name}",
-        f"Страница {page}/{total_pages}",
+        f"Всего выдано: {format_currency(overall_total)}",
+        f"Количество выплат: {len(advances)}",
         "━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>По видам работ:</b>",
     ]
 
-    total_amount = Decimal(0)
+    keyboard = InlineKeyboardBuilder()
+    for idx, bucket in enumerate(groups, start=1):
+        label = str(bucket["label"])
+        total = bucket["total"]
+        count = bucket["count"]
+        min_date = bucket["min_date"]
+        max_date = bucket["max_date"]
+
+        if min_date and max_date:
+            period = f"{min_date.strftime('%d.%m.%Y')} — {max_date.strftime('%d.%m.%Y')}"
+        else:
+            period = "—"
+
+        lines.append(
+            f"\n{idx}. ⚒ <b>{label}</b>\n"
+            f"   💰 {format_currency(total)} • выплат: {count}\n"
+            f"   📅 {period}"
+        )
+
+        token = _encode_work_type_token(label)
+        keyboard.row(
+            InlineKeyboardButton(
+                text=f"⚒ {label} • {format_currency(total)}",
+                callback_data=f"advance:worktype:{object_id}:1:{token}"
+            )
+        )
+
+    keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup()
+    )
+
+
+async def _send_advances_worktype_page(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    object_id: int,
+    work_type_label: str,
+    work_type_token: str,
+    page: int,
+) -> None:
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    advances = await get_advances_by_object(session, object_id)
+    normalized_target = _normalize_work_type(work_type_label)
+    filtered = [
+        advance for advance in advances
+        if _normalize_work_type(advance.work_type) == normalized_target
+    ]
+
+    if not filtered:
+        await _send_advances_overview(callback, session, object_id)
+        return
+
+    total = len(filtered)
+    total_pages = math.ceil(total / ADVANCES_WORK_PAGE_SIZE)
+    page = _normalize_page(page, total_pages)
+    start = (page - 1) * ADVANCES_WORK_PAGE_SIZE
+    current_items = filtered[start:start + ADVANCES_WORK_PAGE_SIZE]
+
+    total_amount = sum((advance.amount for advance in filtered), Decimal(0))
+    min_date = min((adv.date for adv in filtered if adv.date), default=None)
+    max_date = max((adv.date for adv in filtered if adv.date), default=None)
+
+    worker_totals: defaultdict[str, Decimal] = defaultdict(Decimal)
+    worker_counts: defaultdict[str, int] = defaultdict(int)
+    for advance in filtered:
+        name = (advance.worker_name or "Не указан").strip() or "Не указан"
+        worker_totals[name] += advance.amount
+        worker_counts[name] += 1
+
+    worker_summary = sorted(
+        worker_totals.items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    if min_date and max_date:
+        period = f"{min_date.strftime('%d.%m.%Y')} — {max_date.strftime('%d.%m.%Y')}"
+    else:
+        period = "—"
+
+    lines = [
+        f"⚒ <b>{work_type_label}</b>",
+        f"🏗️ {obj.name}",
+        f"Страница {page}/{total_pages}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"Всего выплат: {total}",
+        f"Выдано: {format_currency(total_amount)}",
+        f"Период: {period}",
+        "",
+        "👥 <b>По исполнителям:</b>",
+    ]
+
+    if worker_summary:
+        for name, amount in worker_summary:
+            count = worker_counts[name]
+            lines.append(f"   • {name}: {format_currency(amount)} ({count} выплат)")
+    else:
+        lines.append("   данных нет")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📄 Выплаты:")
+
+    keyboard = InlineKeyboardBuilder()
     for idx, advance in enumerate(current_items, start=start + 1):
         date_str = advance.date.strftime("%d.%m.%Y")
         amount_str = format_currency(advance.amount)
-        total_amount += advance.amount
+        worker = advance.worker_name or "Не указан"
 
         lines.append(
-            f"\n{idx}. 👤 <b>{advance.worker_name}</b>\n"
-            f"   ⚒ {advance.work_type}\n"
+            f"\n{idx}. 👤 {worker}\n"
             f"   💰 {amount_str}\n"
             f"   📅 {date_str}"
         )
 
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"Всего записей: {total}")
-    lines.append(f"Общая сумма текущей страницы: {format_currency(total_amount)}")
-    lines.append(f"Общая сумма всех авансов: {format_currency(overall_total)}")
-
-    keyboard = InlineKeyboardBuilder()
-    for advance in current_items:
-        nav_text = f"👤 {advance.worker_name[:16]} • {format_currency(advance.amount)}"
         keyboard.row(
             InlineKeyboardButton(
-                text=nav_text,
-                callback_data=f"advance:detail:{advance.id}:{object_id}:{page}"
+                text=f"👤 {worker[:16]} • {amount_str}",
+                callback_data=f"advance:detail:{advance.id}:{object_id}:{page}:{work_type_token}"
             )
         )
 
-    nav_buttons = _build_navigation_buttons("object:view_advances", object_id, page, total_pages)
+    nav_buttons = _build_worktype_navigation("advance:worktype", object_id, page, total_pages, work_type_token)
     if nav_buttons:
         keyboard.row(*nav_buttons)
 
-    keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К видам работ",
+            callback_data=f"object:view_advances:{object_id}"
+        )
+    )
 
     await send_new_message(
         callback,
@@ -318,12 +482,20 @@ async def _send_expense_receipt(message: Message, session: AsyncSession, expense
     await message.answer_photo(photo=photo, caption=caption, parse_mode="HTML")
 
 
-def _build_advance_detail_view(advance, user_role: UserRole, object_id: int, page: int):
+def _build_advance_detail_view(
+    advance,
+    user_role: UserRole,
+    object_id: int,
+    page: int,
+    work_type_token: str = "-",
+) -> tuple[str, InlineKeyboardMarkup]:
+    work_type_display = _display_work_type(advance.work_type)
+
     lines = [
         "💵 <b>Детали аванса</b>",
         "",
         f"👤 Рабочий: {advance.worker_name}",
-        f"⚒ Вид работ: {advance.work_type}",
+        f"⚒ Вид работ: {work_type_display}",
         f"💰 Сумма: {format_currency(advance.amount)}",
         f"📅 Дата: {advance.date.strftime('%d.%m.%Y')}",
         "━━━━━━━━━━━━━━━━━━━━━━",
@@ -336,20 +508,25 @@ def _build_advance_detail_view(advance, user_role: UserRole, object_id: int, pag
         keyboard.row(
             InlineKeyboardButton(
                 text="✏️ Редактировать",
-                callback_data=f"advance:edit:{advance.id}:{object_id}:{page}"
+                callback_data=f"advance:edit:{advance.id}:{object_id}:{page}:{work_type_token}"
             )
         )
         keyboard.row(
             InlineKeyboardButton(
                 text="🗑 Удалить",
-                callback_data=f"advance:delete_request:{advance.id}:{object_id}:{page}"
+                callback_data=f"advance:delete_request:{advance.id}:{object_id}:{page}:{work_type_token}"
             )
         )
 
+    if work_type_token and work_type_token != "-":
+        back_callback = f"advance:worktype:{object_id}:{page}:{work_type_token}"
+    else:
+        back_callback = f"object:view_advances:{object_id}"
+
     keyboard.row(
         InlineKeyboardButton(
-            text="🔙 К списку авансов",
-            callback_data=f"object:view_advances:{object_id}:{page}"
+            text="🔙 Назад",
+            callback_data=back_callback
         )
     )
 
@@ -565,9 +742,8 @@ async def view_advances_list(callback: CallbackQuery, user: User, session: Async
 
     parts = callback.data.split(":")
     object_id = int(parts[2])
-    page = int(parts[3]) if len(parts) > 3 else 1
 
-    await _send_advances_page(callback, session, object_id, page)
+    await _send_advances_overview(callback, session, object_id)
     await callback.answer()
 
 
@@ -579,6 +755,19 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
     page = int(parts[3]) if len(parts) > 3 else 1
 
     await _send_expenses_page(callback, session, object_id, page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("advance:worktype:"))
+async def view_advances_by_worktype(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Просмотр авансов по конкретному виду работ"""
+    parts = callback.data.split(":")
+    object_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
+    work_type_token = parts[4]
+
+    work_type_label = _decode_work_type_token(work_type_token)
+    await _send_advances_worktype_page(callback, session, object_id, work_type_label, work_type_token, page)
     await callback.answer()
 
 
@@ -670,7 +859,7 @@ async def choose_expense_field(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
         return
-
+    
     await state.set_state(EditExpenseStates.waiting_value)
 
     prompts = {
@@ -702,7 +891,7 @@ async def apply_expense_edit(message: Message, session: AsyncSession, state: FSM
         await message.answer("❌ Недостаточно прав или некорректное состояние. Попробуйте снова.")
         await state.clear()
         return
-
+    
     value = message.text.strip()
     updates = {}
 
@@ -842,7 +1031,7 @@ async def request_expense_delete(callback: CallbackQuery, user: User, session: A
     if not expense:
         await callback.answer("❌ Расход не найден", show_alert=True)
         return
-
+    
     object_id = object_id or expense.object_id
 
     await send_new_message(
@@ -884,6 +1073,7 @@ async def view_advance_detail(callback: CallbackQuery, user: User, session: Asyn
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
+    work_type_token = parts[5] if len(parts) > 5 else "-"
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -892,7 +1082,7 @@ async def view_advance_detail(callback: CallbackQuery, user: User, session: Asyn
 
     object_id = object_id or advance.object_id
 
-    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page, work_type_token)
     await send_new_message(
         callback,
         text,
@@ -912,6 +1102,7 @@ async def start_advance_edit(callback: CallbackQuery, user: User, session: Async
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
+    work_type_token = parts[5] if len(parts) > 5 else "-"
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -921,7 +1112,12 @@ async def start_advance_edit(callback: CallbackQuery, user: User, session: Async
     object_id = object_id or advance.object_id
 
     await state.set_state(EditAdvanceStates.choose_field)
-    await state.update_data(advance_id=advance_id, object_id=object_id, page=page)
+    await state.update_data(
+        advance_id=advance_id,
+        object_id=object_id,
+        page=page,
+        work_token=work_type_token,
+    )
 
     keyboard = InlineKeyboardBuilder()
     keyboard.row(InlineKeyboardButton(text="👤 Рабочий", callback_data="advance:edit_field:worker_name"))
@@ -975,6 +1171,7 @@ async def apply_advance_edit(message: Message, session: AsyncSession, state: FSM
     object_id = data.get("object_id")
     page = data.get("page", 1)
     field = data.get("field")
+    work_token = data.get("work_token", "-")
 
     if not advance_id or not field:
         await message.answer("⚠️ Некорректное состояние. Попробуйте снова.")
@@ -1020,7 +1217,7 @@ async def apply_advance_edit(message: Message, session: AsyncSession, state: FSM
 
     await state.clear()
 
-    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page, work_token)
     await message.answer("✅ Изменения сохранены.")
     await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
@@ -1033,6 +1230,7 @@ async def cancel_advance_edit(callback: CallbackQuery, session: AsyncSession, st
     advance_id = data.get("advance_id")
     object_id = data.get("object_id")
     page = data.get("page", 1)
+    work_token = data.get("work_token", "-")
 
     if not advance_id:
         await callback.answer("Отменено")
@@ -1045,7 +1243,7 @@ async def cancel_advance_edit(callback: CallbackQuery, session: AsyncSession, st
 
     object_id = object_id or advance.object_id
 
-    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page, work_token)
     await send_new_message(
         callback,
         text,
@@ -1060,11 +1258,12 @@ async def request_advance_delete(callback: CallbackQuery, user: User, session: A
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-
+    
     parts = callback.data.split(":")
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
+    work_token = parts[5] if len(parts) > 5 else "-"
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -1077,8 +1276,8 @@ async def request_advance_delete(callback: CallbackQuery, user: User, session: A
         callback,
         "⚠️ Удалить этот аванс?",
         reply_markup=get_confirm_keyboard(
-            f"advance:delete_confirm:{advance_id}:{object_id}:{page}",
-            f"advance:detail:{advance_id}:{object_id}:{page}"
+            f"advance:delete_confirm:{advance_id}:{object_id}:{page}:{work_token}",
+            f"advance:detail:{advance_id}:{object_id}:{page}:{work_token}"
         ),
     )
     await callback.answer()
@@ -1089,11 +1288,12 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-
+    
     parts = callback.data.split(":")
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
+    work_token = parts[5] if len(parts) > 5 else "-"
 
     success = await delete_advance(session, advance_id)
     if not success:
@@ -1103,5 +1303,9 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
     await state.clear()
     await callback.answer("🗑 Аванс удалён", show_alert=True)
 
-    await _send_advances_page(callback, session, object_id, page)
+    if work_token and work_token != "-":
+        work_label = _decode_work_type_token(work_token)
+        await _send_advances_worktype_page(callback, session, object_id, work_label, work_token, page)
+    else:
+        await _send_advances_overview(callback, session, object_id)
 
