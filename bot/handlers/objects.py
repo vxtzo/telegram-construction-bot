@@ -1,9 +1,14 @@
 """
 Обработчики для просмотра объектов
 """
+import math
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Message
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import User, ObjectStatus, UserRole, PaymentSource, CompensationStatus, ExpenseType
@@ -15,7 +20,12 @@ from database.crud import (
     get_expense_by_id,
     update_compensation_status,
     get_file_by_id,
-    get_advances_by_object
+    get_advances_by_object,
+    delete_expense,
+    update_expense,
+    get_advance_by_id,
+    update_advance,
+    delete_advance
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -23,9 +33,327 @@ from bot.keyboards.objects_kb import (
 )
 from bot.keyboards.main_menu import get_confirm_keyboard
 from bot.services.report_generator import generate_object_report
+from bot.services.calculations import format_currency
+from bot.states.expense_states import EditExpenseStates, EditAdvanceStates
 from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
+
+
+EXPENSES_PAGE_SIZE = 10
+ADVANCES_PAGE_SIZE = 10
+
+
+EXPENSE_TYPE_ICONS = {
+    ExpenseType.SUPPLIES: "🧰",
+    ExpenseType.TRANSPORT: "🚚",
+    ExpenseType.OVERHEAD: "🧾",
+}
+
+
+def _get_expense_status(expense):
+    if expense.payment_source == PaymentSource.PERSONAL:
+        if expense.compensation_status == CompensationStatus.COMPENSATED:
+            return "✅", "Компенсация выполнена"
+        return "⏳", "К возмещению прорабу"
+    return "💳", "Оплачено с карты ИП"
+
+
+def _normalize_page(page: int, total_pages: int) -> int:
+    if total_pages <= 0:
+        return 1
+    return max(1, min(page, total_pages))
+
+
+def _build_navigation_buttons(prefix: str, object_id: int, page: int, total_pages: int) -> list[InlineKeyboardButton]:
+    buttons: list[InlineKeyboardButton] = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"{prefix}:{object_id}:{page - 1}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton(text="➡️ Следующая", callback_data=f"{prefix}:{object_id}:{page + 1}"))
+    return buttons
+
+
+async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    expenses = await get_expenses_by_object(session, object_id)
+    total = len(expenses)
+
+    if total == 0:
+        await send_new_message(
+            callback,
+            f"📋 <b>Расходы объекта</b>\n\n🏗️ {obj.name}\n\nПока нет добавленных расходов.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]]
+            ),
+        )
+        return
+
+    total_pages = math.ceil(total / EXPENSES_PAGE_SIZE)
+    page = _normalize_page(page, total_pages)
+    start = (page - 1) * EXPENSES_PAGE_SIZE
+    current_items = expenses[start:start + EXPENSES_PAGE_SIZE]
+
+    lines = [
+        "📋 <b>Расходы объекта</b>",
+        f"🏗️ {obj.name}",
+        f"Страница {page}/{total_pages}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for idx, expense in enumerate(current_items, start=start + 1):
+        status_icon, status_text = _get_expense_status(expense)
+        type_icon = EXPENSE_TYPE_ICONS.get(expense.type, "💰")
+        date_str = expense.date.strftime("%d.%m.%Y")
+        amount_str = format_currency(expense.amount)
+        has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
+        receipt_note = " • 📎 Чек прикреплён" if has_receipt else ""
+
+        lines.append(
+            f"\n{idx}. {type_icon} {status_icon} {date_str} • {amount_str}\n"
+            f"   {expense.description[:80]}\n"
+            f"   <i>{status_text}{receipt_note}</i>"
+        )
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"Всего расходов: {total}")
+
+    keyboard = InlineKeyboardBuilder()
+    for expense in current_items:
+        status_icon, _ = _get_expense_status(expense)
+        nav_text = f"{status_icon} {format_currency(expense.amount)} • {expense.date.strftime('%d.%m')}"
+        keyboard.row(
+            InlineKeyboardButton(
+                text=nav_text,
+                callback_data=f"expense:detail:{expense.id}:{object_id}:{page}"
+            )
+        )
+
+    nav_buttons = _build_navigation_buttons("object:view_expenses", object_id, page, total_pages)
+    if nav_buttons:
+        keyboard.row(*nav_buttons)
+
+    keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup()
+    )
+
+
+async def _send_advances_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    advances = await get_advances_by_object(session, object_id)
+    total = len(advances)
+
+    if total == 0:
+        await send_new_message(
+            callback,
+            f"📄 <b>Авансы по объекту</b>\n\n🏗️ {obj.name}\n\nПока нет добавленных авансов.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]]
+            ),
+        )
+        return
+
+    total_pages = math.ceil(total / ADVANCES_PAGE_SIZE)
+    page = _normalize_page(page, total_pages)
+    start = (page - 1) * ADVANCES_PAGE_SIZE
+    current_items = advances[start:start + ADVANCES_PAGE_SIZE]
+    overall_total = sum(a.amount for a in advances)
+
+    lines = [
+        "📄 <b>Авансы по объекту</b>",
+        f"🏗️ {obj.name}",
+        f"Страница {page}/{total_pages}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    total_amount = Decimal(0)
+    for idx, advance in enumerate(current_items, start=start + 1):
+        date_str = advance.date.strftime("%d.%m.%Y")
+        amount_str = format_currency(advance.amount)
+        total_amount += advance.amount
+
+        lines.append(
+            f"\n{idx}. 👤 <b>{advance.worker_name}</b>\n"
+            f"   ⚒ {advance.work_type}\n"
+            f"   💰 {amount_str}\n"
+            f"   📅 {date_str}"
+        )
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"Всего записей: {total}")
+    lines.append(f"Общая сумма текущей страницы: {format_currency(total_amount)}")
+    lines.append(f"Общая сумма всех авансов: {format_currency(overall_total)}")
+
+    keyboard = InlineKeyboardBuilder()
+    for advance in current_items:
+        nav_text = f"👤 {advance.worker_name[:16]} • {format_currency(advance.amount)}"
+        keyboard.row(
+            InlineKeyboardButton(
+                text=nav_text,
+                callback_data=f"advance:detail:{advance.id}:{object_id}:{page}"
+            )
+        )
+
+    nav_buttons = _build_navigation_buttons("object:view_advances", object_id, page, total_pages)
+    if nav_buttons:
+        keyboard.row(*nav_buttons)
+
+    keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup()
+    )
+
+
+EXPENSE_TYPE_TITLES = {
+    ExpenseType.SUPPLIES: "Расходники",
+    ExpenseType.TRANSPORT: "Транспорт",
+    ExpenseType.OVERHEAD: "Накладные расходы",
+}
+
+
+def _build_expense_detail_view(expense, user_role: UserRole, object_id: int, page: int):
+    status_icon, status_text = _get_expense_status(expense)
+    type_icon = EXPENSE_TYPE_ICONS.get(expense.type, "💰")
+    type_title = EXPENSE_TYPE_TITLES.get(expense.type, "Расход")
+
+    has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
+    can_compensate = (
+        expense.payment_source == PaymentSource.PERSONAL
+        and expense.compensation_status == CompensationStatus.PENDING
+    )
+
+    lines = [
+        f"{status_icon} <b>Детали расхода</b>",
+        "",
+        f"Тип: {type_icon} {type_title}",
+        f"💰 Сумма: {format_currency(expense.amount)}",
+        f"📅 Дата: {expense.date.strftime('%d.%m.%Y')}",
+        f"📝 Описание: {expense.description}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"Статус: <b>{status_text}</b>",
+    ]
+
+    if has_receipt:
+        lines.append("📎 Чек прикреплён — см. ниже")
+
+    keyboard = InlineKeyboardBuilder()
+
+    if can_compensate and user_role == UserRole.ADMIN:
+        keyboard.row(
+            InlineKeyboardButton(
+                text="✅ Отметить как компенсировано",
+                callback_data=f"expense:compensate:{expense.id}:{object_id}:{page}"
+            )
+        )
+
+    if user_role == UserRole.ADMIN:
+        keyboard.row(
+            InlineKeyboardButton(
+                text="✏️ Редактировать",
+                callback_data=f"expense:edit:{expense.id}:{object_id}:{page}"
+            )
+        )
+        keyboard.row(
+            InlineKeyboardButton(
+                text="🗑 Удалить",
+                callback_data=f"expense:delete_request:{expense.id}:{object_id}:{page}"
+            )
+        )
+
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К списку расходов",
+            callback_data=f"object:view_expenses:{object_id}:{page}"
+        )
+    )
+
+    return "\n".join(lines), keyboard.as_markup(), has_receipt
+
+
+async def _send_expense_receipt(message: Message, session: AsyncSession, expense) -> None:
+    receipt_id = None
+    try:
+        receipt_id = int(expense.photo_url.split("_", 1)[1]) if expense.photo_url else None
+    except (ValueError, IndexError):
+        receipt_id = None
+
+    if not receipt_id:
+        return
+
+    receipt_file = await get_file_by_id(session, receipt_id)
+    if not receipt_file or not receipt_file.file_data:
+        await message.answer("⚠️ Чек был прикреплён, но не найден в базе данных")
+        return
+
+    size_kb = (receipt_file.file_size or 0) // 1024
+    caption = (
+        f"📎 <b>Чек по расходу</b>\n"
+        f"📅 Загружен: {receipt_file.uploaded_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📦 Размер: {size_kb} КБ"
+    )
+
+    photo = BufferedInputFile(
+        receipt_file.file_data,
+        filename=receipt_file.filename or "receipt.jpg"
+    )
+    await message.answer_photo(photo=photo, caption=caption, parse_mode="HTML")
+
+
+def _build_advance_detail_view(advance, user_role: UserRole, object_id: int, page: int):
+    lines = [
+        "💵 <b>Детали аванса</b>",
+        "",
+        f"👤 Рабочий: {advance.worker_name}",
+        f"⚒ Вид работ: {advance.work_type}",
+        f"💰 Сумма: {format_currency(advance.amount)}",
+        f"📅 Дата: {advance.date.strftime('%d.%m.%Y')}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"ID пользователя: {advance.added_by}",
+    ]
+
+    keyboard = InlineKeyboardBuilder()
+
+    if user_role == UserRole.ADMIN:
+        keyboard.row(
+            InlineKeyboardButton(
+                text="✏️ Редактировать",
+                callback_data=f"advance:edit:{advance.id}:{object_id}:{page}"
+            )
+        )
+        keyboard.row(
+            InlineKeyboardButton(
+                text="🗑 Удалить",
+                callback_data=f"advance:delete_request:{advance.id}:{object_id}:{page}"
+            )
+        )
+
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К списку авансов",
+            callback_data=f"object:view_advances:{object_id}:{page}"
+        )
+    )
+
+    return "\n".join(lines), keyboard.as_markup()
 
 
 @router.callback_query(F.data.in_(["objects:active", "objects:completed"]))
@@ -235,290 +563,545 @@ async def cancel_restore_object(callback: CallbackQuery):
 async def view_advances_list(callback: CallbackQuery, user: User, session: AsyncSession):
     """Просмотр списка авансов по объекту"""
 
-    object_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    object_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
 
-    obj = await get_object_by_id(session, object_id, load_relations=False)
-    if not obj:
-        await callback.answer("❌ Объект не найден", show_alert=True)
-        return
-
-    advances = await get_advances_by_object(session, object_id)
-
-    if not advances:
-        await send_new_message(
-            callback,
-            f"📄 <b>Авансы по объекту</b>\n\n"
-            f"🏗️ {obj.name}\n\n"
-            f"Пока нет добавленных авансов.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-            ]),
-        )
-        await callback.answer()
-        return
-
-    from bot.services.calculations import format_currency
-
-    text = f"📄 <b>Авансы по объекту</b>\n\n"
-    text += f"🏗️ {obj.name}\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-
-    advances_sorted = sorted(advances, key=lambda a: a.date, reverse=True)
-
-    for advance in advances_sorted[:25]:
-        date_str = advance.date.strftime("%d.%m.%Y")
-        text += (
-            f"\n👤 <b>{advance.worker_name}</b>\n"
-            f"⚒ {advance.work_type}\n"
-            f"💰 {format_currency(advance.amount)}\n"
-            f"📅 {date_str}\n"
-        )
-
-    if len(advances_sorted) > 25:
-        text += f"\n… и ещё {len(advances_sorted) - 25} записей"
-
-    total_decimal = sum(a.amount for a in advances)
-    text += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Всего авансов: {len(advances)}\n"
-    text += f"Общая сумма: {format_currency(total_decimal)}"
-
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-    ])
-
-    await send_new_message(
-        callback,
-        text,
-        parse_mode="HTML",
-        reply_markup=reply_markup
-    )
+    await _send_advances_page(callback, session, object_id, page)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("object:view_expenses:"))
 async def view_expenses_list(callback: CallbackQuery, user: User, session: AsyncSession):
     """Просмотр списка расходов объекта"""
-    
-    object_id = int(callback.data.split(":")[2])
-    
-    # Получаем объект
-    obj = await get_object_by_id(session, object_id, load_relations=False)
-    if not obj:
-        await callback.answer("❌ Объект не найден", show_alert=True)
-        return
-    
-    # Получаем расходы
-    expenses = await get_expenses_by_object(session, object_id)
-    
-    if not expenses:
-        await send_new_message(
-            callback,
-            f"📋 <b>Расходы объекта</b>\n\n"
-            f"🏗️ {obj.name}\n\n"
-            f"Пока нет добавленных расходов.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]
-            ]),
-        )
-        await callback.answer()
-        return
-    
-    # Формируем список расходов с иконками статусов
-    from bot.services.calculations import format_currency
-    
-    text = f"📋 <b>Расходы объекта</b>\n\n"
-    text += f"🏗️ {obj.name}\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    # Группируем по типу
-    supplies = [e for e in expenses if e.type == ExpenseType.SUPPLIES]
-    transport = [e for e in expenses if e.type == ExpenseType.TRANSPORT]
-    overhead = [e for e in expenses if e.type == ExpenseType.OVERHEAD]
-    
-    expense_groups = [
-        ("🧰 Расходники", supplies),
-        ("🚚 Транспорт", transport),
-        ("🧾 Накладные", overhead)
-    ]
-    
-    builder = InlineKeyboardButton
-    buttons = []
-    
-    for emoji_title, exp_list in expense_groups:
-        if exp_list:
-            text += f"\n{emoji_title}:\n"
-            for exp in exp_list[:10]:  # Показываем до 10 расходов каждого типа
-                # Иконка статуса оплаты
-                if exp.payment_source == PaymentSource.PERSONAL:
-                    if exp.compensation_status == CompensationStatus.PENDING:
-                        status_icon = "⏳"  # К компенсации
-                        status_text = "К возмещению прорабу"
-                    else:
-                        status_icon = "✅"  # Компенсировано
-                        status_text = "Компенсация выполнена"
-                else:
-                    status_icon = "💳"  # Оплачено фирмой
-                    status_text = "Оплачено с карты ИП"
+    parts = callback.data.split(":")
+    object_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
 
-                has_receipt = bool(exp.photo_url and exp.photo_url.startswith("file_"))
-                receipt_note = " • 📎 Чек прикреплен" if has_receipt else ""
-                button_receipt_icon = " 📎" if has_receipt else ""
-
-                date_str = exp.date.strftime("%d.%m")
-                text += f"\n{status_icon} {date_str} • {format_currency(exp.amount)}\n"
-                text += f"   {exp.description[:50]}\n"
-                text += f"   <i>{status_text}{receipt_note}</i>\n"
-
-                # Добавляем кнопку для детального просмотра
-                buttons.append([
-                    InlineKeyboardButton(
-                        text=f"{status_icon}{button_receipt_icon} {date_str} - {format_currency(exp.amount)}",
-                        callback_data=f"expense:detail:{exp.id}"
-                    )
-                ])
-    
-    text += f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Всего расходов: {len(expenses)}"
-    
-    # Добавляем кнопку назад
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")])
-    
-    await send_new_message(
-        callback,
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons[:15])  # Лимит кнопок
-    )
+    await _send_expenses_page(callback, session, object_id, page)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("expense:detail:"))
 async def view_expense_detail(callback: CallbackQuery, user: User, session: AsyncSession):
     """Детальный просмотр расхода"""
-    
-    expense_id = int(callback.data.split(":")[2])
-    
-    # Получаем расход
+    parts = callback.data.split(":")
+    expense_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 1
+
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
         await callback.answer("❌ Расход не найден", show_alert=True)
         return
-    
-    # Форматируем детальную информацию
-    from bot.services.calculations import format_currency
-    
-    type_names = {
-        ExpenseType.SUPPLIES: "🧰 Расходники",
-        ExpenseType.TRANSPORT: "🚚 Транспортные расходы",
-        ExpenseType.OVERHEAD: "🧾 Накладные расходы"
-    }
-    
-    # Иконка и статус
-    if expense.payment_source == PaymentSource.PERSONAL:
-        if expense.compensation_status == CompensationStatus.PENDING:
-            status_icon = "⏳"
-            status_text = "К возмещению прорабу"
-            can_compensate = user.role == UserRole.ADMIN
-        else:
-            status_icon = "✅"
-            status_text = "Компенсация выполнена!"
-            can_compensate = False
-    else:
-        status_icon = "💳"
-        status_text = "Оплачено с карты ИП"
-        can_compensate = False
-    
-    has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
 
-    text = f"{status_icon} <b>Детали расхода</b>\n\n"
-    text += f"Тип: {type_names.get(expense.type, expense.type)}\n"
-    text += f"💰 Сумма: {format_currency(expense.amount)}\n"
-    text += f"📅 Дата: {expense.date.strftime('%d.%m.%Y')}\n"
-    text += f"📝 Описание: {expense.description}\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Статус: <b>{status_text}</b>\n"
-    if has_receipt:
-        text += "📎 Чек прикреплён — см. сообщение ниже\n"
- 
-    # Кнопки
-    buttons = []
- 
-    # Если к компенсации и пользователь админ - добавляем кнопку компенсации
-    if can_compensate:
-        buttons.append([
-            InlineKeyboardButton(
-                text="✅ Отметить как компенсировано",
-                callback_data=f"expense:compensate:{expense_id}"
-            )
-        ])
- 
-    # Кнопка назад
-    buttons.append([
-        InlineKeyboardButton(
-            text="🔙 К списку расходов",
-            callback_data=f"object:view_expenses:{expense.object_id}"
-        )
-    ])
- 
+    object_id = object_id or expense.object_id
+
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+
     await send_new_message(
         callback,
         text,
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        reply_markup=reply_markup,
     )
 
     if has_receipt:
-        receipt_id = None
-        try:
-            receipt_id = int(expense.photo_url.split("_", 1)[1])
-        except (ValueError, IndexError):
-            receipt_id = None
-
-        if receipt_id:
-            receipt_file = await get_file_by_id(session, receipt_id)
-            if receipt_file and receipt_file.file_data:
-                size_kb = (receipt_file.file_size or 0) // 1024
-                caption = (
-                    f"📎 <b>Чек по расходу</b>\n"
-                    f"📅 Загружен: {receipt_file.uploaded_at.strftime('%d.%m.%Y %H:%M')}\n"
-                    f"📦 Размер: {size_kb} КБ"
-                )
-                photo = BufferedInputFile(
-                    receipt_file.file_data,
-                    filename=receipt_file.filename or "receipt.jpg"
-                )
-                await callback.message.answer_photo(
-                    photo=photo,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.answer("⚠️ Чек был прикреплён, но не найден в базе данных")
+        await _send_expense_receipt(callback.message, session, expense)
 
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("expense:compensate:"))
-async def compensate_expense(callback: CallbackQuery, user: User, session: AsyncSession):
-    """Отметить расход как компенсированный"""
-    
+@router.callback_query(F.data.startswith("expense:edit:"))
+async def start_expense_edit(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     if user.role != UserRole.ADMIN:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
-    
-    expense_id = int(callback.data.split(":")[2])
-    
-    # Обновляем статус
-    expense = await update_compensation_status(session, expense_id, CompensationStatus.COMPENSATED)
-    
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    expense = await get_expense_by_id(session, expense_id)
     if not expense:
-        await callback.answer("❌ Ошибка обновления статуса", show_alert=True)
+        await callback.answer("❌ Расход не найден", show_alert=True)
         return
-    
-    await callback.answer("✅ Компенсация отмечена!", show_alert=True)
-    
-    # Перенаправляем на детальный просмотр
-    await view_expense_detail(callback, user, session)
+
+    object_id = object_id or expense.object_id
+
+    await state.set_state(EditExpenseStates.choose_field)
+    await state.update_data(expense_id=expense_id, object_id=object_id, page=page)
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="💰 Сумма", callback_data="expense:edit_field:amount"))
+    keyboard.row(InlineKeyboardButton(text="📅 Дата", callback_data="expense:edit_field:date"))
+    keyboard.row(InlineKeyboardButton(text="📝 Описание", callback_data="expense:edit_field:description"))
+    keyboard.row(InlineKeyboardButton(text="💳 Источник оплаты", callback_data="expense:edit_field:payment_source"))
+    keyboard.row(InlineKeyboardButton(text="❌ Отмена", callback_data="expense:edit_cancel"))
+
+    await send_new_message(
+        callback,
+        "✏️ <b>Редактирование расхода</b>\n\nВыберите поле, которое нужно изменить:",
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(EditExpenseStates.choose_field, F.data.startswith("expense:edit_field:"))
+async def choose_expense_field(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    field = parts[2]
+
+    await state.update_data(field=field)
+
+    if field == "payment_source":
+        await state.set_state(EditExpenseStates.choose_payment_source)
+        keyboard = InlineKeyboardBuilder()
+        keyboard.row(InlineKeyboardButton(text="💳 Оплачено фирмой", callback_data="expense:edit_payment_source:company"))
+        keyboard.row(InlineKeyboardButton(text="💰 Оплачено прорабом", callback_data="expense:edit_payment_source:personal"))
+        keyboard.row(InlineKeyboardButton(text="❌ Отмена", callback_data="expense:edit_cancel"))
+
+        await send_new_message(
+            callback,
+            "Выберите новый источник оплаты:",
+            reply_markup=keyboard.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    await state.set_state(EditExpenseStates.waiting_value)
+
+    prompts = {
+        "amount": "Введите новую сумму (например: 12500)",
+        "date": "Введите новую дату в формате <code>ДД.ММ.ГГГГ</code>",
+        "description": "Введите новое описание (минимум 3 символа)",
+    }
+
+    await send_new_message(
+        callback,
+        prompts.get(field, "Введите новое значение"),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="expense:edit_cancel")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(EditExpenseStates.waiting_value)
+async def apply_expense_edit(message: Message, session: AsyncSession, state: FSMContext, user: User):
+    data = await state.get_data()
+    expense_id = data.get("expense_id")
+    object_id = data.get("object_id")
+    page = data.get("page", 1)
+    field = data.get("field")
+
+    if user.role != UserRole.ADMIN or not expense_id or not field:
+        await message.answer("❌ Недостаточно прав или некорректное состояние. Попробуйте снова.")
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    updates = {}
+
+    if field == "amount":
+        try:
+            updates["amount"] = Decimal(value.replace(" ", "").replace(",", "."))
+        except (InvalidOperation, AttributeError):
+            await message.answer("❌ Неверный формат суммы. Пример: 12500")
+            return
+    elif field == "date":
+        parsed_date = None
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                parsed_date = datetime.strptime(value, fmt)
+                break
+            except ValueError:
+                continue
+        if not parsed_date:
+            await message.answer("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
+            return
+        updates["date"] = parsed_date
+    elif field == "description":
+        if len(value) < 3:
+            await message.answer("❌ Описание должно содержать минимум 3 символа")
+            return
+        updates["description"] = value
+    else:
+        await message.answer("⚠️ Это поле нельзя изменить таким образом.")
+        await state.clear()
+        return
+
+    expense = await update_expense(session, expense_id, **updates)
+    if not expense:
+        await message.answer("❌ Не удалось обновить расход. Попробуйте снова.")
+        await state.clear()
+        return
+
+    await state.clear()
+
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    await message.answer("✅ Изменения сохранены.")
+    await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
+
+    if has_receipt:
+        await _send_expense_receipt(message, session, expense)
+
+
+@router.callback_query(EditExpenseStates.choose_payment_source, F.data.startswith("expense:edit_payment_source:"))
+async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSession, state: FSMContext, user: User):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    new_value = parts[2]
+
+    data = await state.get_data()
+    expense_id = data.get("expense_id")
+    object_id = data.get("object_id")
+    page = data.get("page", 1)
+
+    expense = await get_expense_by_id(session, expense_id)
+    if not expense:
+        await state.clear()
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    if new_value == "company":
+        updates = {"payment_source": PaymentSource.COMPANY, "compensation_status": None}
+    else:
+        compensation_status = expense.compensation_status or CompensationStatus.PENDING
+        updates = {"payment_source": PaymentSource.PERSONAL, "compensation_status": compensation_status}
+
+    expense = await update_expense(session, expense_id, **updates)
+    await state.clear()
+
+    await callback.answer("✅ Источник оплаты обновлён", show_alert=True)
+
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+
+    if has_receipt:
+        await _send_expense_receipt(callback.message, session, expense)
+
+
+@router.callback_query(F.data == "expense:edit_cancel")
+async def cancel_expense_edit(callback: CallbackQuery, session: AsyncSession, state: FSMContext, user: User):
+    data = await state.get_data()
+    await state.clear()
+
+    expense_id = data.get("expense_id")
+    object_id = data.get("object_id")
+    page = data.get("page", 1)
+
+    if not expense_id:
+        await callback.answer("❌ Отмена", show_alert=True)
+        return
+
+    expense = await get_expense_by_id(session, expense_id)
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    object_id = object_id or expense.object_id
+
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+
+    if has_receipt:
+        await _send_expense_receipt(callback.message, session, expense)
+
+    await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("expense:delete_request:"))
+async def request_expense_delete(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    expense = await get_expense_by_id(session, expense_id)
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    object_id = object_id or expense.object_id
+
+    await send_new_message(
+        callback,
+        "⚠️ Вы уверены, что хотите удалить этот расход?",
+        reply_markup=get_confirm_keyboard(
+            f"expense:delete_confirm:{expense_id}:{object_id}:{page}",
+            f"expense:detail:{expense_id}:{object_id}:{page}"
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("expense:delete_confirm:"))
+async def confirm_expense_delete(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    success = await delete_expense(session, expense_id)
+    if not success:
+        await callback.answer("❌ Не удалось удалить расход", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer("🗑 Расход удалён", show_alert=True)
+
+    await _send_expenses_page(callback, session, object_id, page)
+
+
+@router.callback_query(F.data.startswith("advance:detail:"))
+async def view_advance_detail(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.split(":")
+    advance_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    advance = await get_advance_by_id(session, advance_id)
+    if not advance:
+        await callback.answer("❌ Аванс не найден", show_alert=True)
+        return
+
+    object_id = object_id or advance.object_id
+
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("advance:edit:"))
+async def start_advance_edit(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    advance_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else None
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    advance = await get_advance_by_id(session, advance_id)
+    if not advance:
+        await callback.answer("❌ Аванс не найден", show_alert=True)
+        return
+
+    object_id = object_id or advance.object_id
+
+    await state.set_state(EditAdvanceStates.choose_field)
+    await state.update_data(advance_id=advance_id, object_id=object_id, page=page)
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(InlineKeyboardButton(text="👤 Рабочий", callback_data="advance:edit_field:worker_name"))
+    keyboard.row(InlineKeyboardButton(text="⚒ Вид работ", callback_data="advance:edit_field:work_type"))
+    keyboard.row(InlineKeyboardButton(text="💰 Сумма", callback_data="advance:edit_field:amount"))
+    keyboard.row(InlineKeyboardButton(text="📅 Дата", callback_data="advance:edit_field:date"))
+    keyboard.row(InlineKeyboardButton(text="❌ Отмена", callback_data="advance:edit_cancel"))
+
+    await send_new_message(
+        callback,
+        "✏️ <b>Редактирование аванса</b>\n\nВыберите поле для изменения:",
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(EditAdvanceStates.choose_field, F.data.startswith("advance:edit_field:"))
+async def choose_advance_field(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.split(":")[2]
+    await state.update_data(field=field)
+    await state.set_state(EditAdvanceStates.waiting_value)
+
+    prompts = {
+        "worker_name": "Введите новое имя рабочего",
+        "work_type": "Введите новый вид работ",
+        "amount": "Введите новую сумму (например: 8000)",
+        "date": "Введите новую дату в формате <code>ДД.ММ.ГГГГ</code>",
+    }
+
+    await send_new_message(
+        callback,
+        prompts.get(field, "Введите новое значение"),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="advance:edit_cancel")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(EditAdvanceStates.waiting_value)
+async def apply_advance_edit(message: Message, session: AsyncSession, state: FSMContext, user: User):
+    if user.role != UserRole.ADMIN:
+        await message.answer("❌ Недостаточно прав.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    advance_id = data.get("advance_id")
+    object_id = data.get("object_id")
+    page = data.get("page", 1)
+    field = data.get("field")
+
+    if not advance_id or not field:
+        await message.answer("⚠️ Некорректное состояние. Попробуйте снова.")
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    updates = {}
+
+    if field == "amount":
+        try:
+            updates["amount"] = Decimal(value.replace(" ", "").replace(",", "."))
+        except (InvalidOperation, AttributeError):
+            await message.answer("❌ Неверный формат суммы. Пример: 8000")
+            return
+    elif field == "date":
+        parsed_date = None
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                parsed_date = datetime.strptime(value, fmt)
+                break
+            except ValueError:
+                continue
+        if not parsed_date:
+            await message.answer("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
+            return
+        updates["date"] = parsed_date
+    elif field in {"worker_name", "work_type"}:
+        if len(value) < 2:
+            await message.answer("❌ Значение должно содержать минимум 2 символа")
+            return
+        updates[field] = value
+    else:
+        await message.answer("⚠️ Это поле нельзя изменить")
+        await state.clear()
+        return
+
+    advance = await update_advance(session, advance_id, **updates)
+    if not advance:
+        await message.answer("❌ Не удалось обновить аванс")
+        await state.clear()
+        return
+
+    await state.clear()
+
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    await message.answer("✅ Изменения сохранены.")
+    await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
+
+
+@router.callback_query(F.data == "advance:edit_cancel")
+async def cancel_advance_edit(callback: CallbackQuery, session: AsyncSession, state: FSMContext, user: User):
+    data = await state.get_data()
+    await state.clear()
+
+    advance_id = data.get("advance_id")
+    object_id = data.get("object_id")
+    page = data.get("page", 1)
+
+    if not advance_id:
+        await callback.answer("Отменено")
+        return
+
+    advance = await get_advance_by_id(session, advance_id)
+    if not advance:
+        await callback.answer("❌ Аванс не найден", show_alert=True)
+        return
+
+    object_id = object_id or advance.object_id
+
+    text, reply_markup = _build_advance_detail_view(advance, user.role, object_id, page)
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+    await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("advance:delete_request:"))
+async def request_advance_delete(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    advance_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    advance = await get_advance_by_id(session, advance_id)
+    if not advance:
+        await callback.answer("❌ Аванс не найден", show_alert=True)
+        return
+
+    object_id = object_id or advance.object_id
+
+    await send_new_message(
+        callback,
+        "⚠️ Удалить этот аванс?",
+        reply_markup=get_confirm_keyboard(
+            f"advance:delete_confirm:{advance_id}:{object_id}:{page}",
+            f"advance:detail:{advance_id}:{object_id}:{page}"
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("advance:delete_confirm:"))
+async def confirm_advance_delete(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    advance_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 else 1
+
+    success = await delete_advance(session, advance_id)
+    if not success:
+        await callback.answer("❌ Не удалось удалить аванс", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer("🗑 Аванс удалён", show_alert=True)
+
+    await _send_advances_page(callback, session, object_id, page)
 

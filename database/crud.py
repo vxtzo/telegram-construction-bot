@@ -327,6 +327,34 @@ async def get_pending_compensations_by_object(
     return list(result.scalars().all())
 
 
+async def update_expense(
+    session: AsyncSession,
+    expense_id: int,
+    **fields
+) -> Optional[Expense]:
+    """Обновить данные расхода"""
+    if not fields:
+        return await get_expense_by_id(session, expense_id)
+
+    result = await session.execute(
+        update(Expense)
+        .where(Expense.id == expense_id)
+        .values(**fields)
+        .returning(Expense)
+    )
+    await session.commit()
+    return result.scalar_one_or_none()
+
+
+async def delete_expense(session: AsyncSession, expense_id: int) -> bool:
+    """Удалить расход"""
+    result = await session.execute(
+        delete(Expense).where(Expense.id == expense_id)
+    )
+    await session.commit()
+    return result.rowcount > 0
+
+
 # ============ ADVANCE CRUD ============
 
 async def create_advance(
@@ -353,6 +381,14 @@ async def create_advance(
     return advance
 
 
+async def get_advance_by_id(session: AsyncSession, advance_id: int) -> Optional[Advance]:
+    """Получить аванс по ID"""
+    result = await session.execute(
+        select(Advance).where(Advance.id == advance_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_advances_by_object(session: AsyncSession, object_id: int) -> List[Advance]:
     """Получить авансы по объекту"""
     result = await session.execute(
@@ -370,6 +406,34 @@ async def get_total_advances(session: AsyncSession, object_id: int) -> Decimal:
     )
     total = result.scalar()
     return Decimal(total) if total else Decimal(0)
+
+
+async def update_advance(
+    session: AsyncSession,
+    advance_id: int,
+    **fields
+) -> Optional[Advance]:
+    """Обновить данные аванса"""
+    if not fields:
+        return None
+
+    result = await session.execute(
+        update(Advance)
+        .where(Advance.id == advance_id)
+        .values(**fields)
+        .returning(Advance)
+    )
+    await session.commit()
+    return result.scalar_one_or_none()
+
+
+async def delete_advance(session: AsyncSession, advance_id: int) -> bool:
+    """Удалить аванс"""
+    result = await session.execute(
+        delete(Advance).where(Advance.id == advance_id)
+    )
+    await session.commit()
+    return result.rowcount > 0
 
 
 # ============ FILE CRUD ============

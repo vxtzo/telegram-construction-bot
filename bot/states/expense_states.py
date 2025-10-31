@@ -29,3 +29,18 @@ class ReportPeriodStates(StatesGroup):
     waiting_date_to = State()
 
 
+class EditExpenseStates(StatesGroup):
+    """Состояния для редактирования расхода"""
+
+    choose_field = State()
+    waiting_value = State()
+    choose_payment_source = State()
+
+
+class EditAdvanceStates(StatesGroup):
+    """Состояния для редактирования аванса"""
+
+    choose_field = State()
+    waiting_value = State()
+
+
