@@ -118,7 +118,6 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
         "📊 ИТОГОВЫЕ ПОКАЗАТЕЛИ",
         "",
         f"Общие доходы: {_currency(data['total_income'])}",
-        f"Общие расходы: {_currency(data['total_expenses'])}",
         f"💰 Прибыль: {_format_positive(data['total_profit'])}",
         f"📈 Рентабельность: {_percentage(data['profitability'])}",
     ]
@@ -204,19 +203,16 @@ def generate_period_report(
     # Считаем агрегированные показатели
     total_income = Decimal(0)
     total_profit = Decimal(0)
-    total_expenses = Decimal(0)
     
     for obj in objects:
         data = calculate_profit_data(obj)
         total_income += data['total_income']
         total_profit += data['total_profit']
-        total_expenses += data['total_expenses']
     
     company_total = company_data.get("total", Decimal(0))
     company_one_time = company_data.get("one_time", Decimal(0))
     company_recurring = company_data.get("recurring", Decimal(0))
 
-    adjusted_expenses = total_expenses + company_total
     adjusted_profit = total_profit - company_total
 
     avg_profitability = (adjusted_profit / total_income * 100) if total_income > 0 else Decimal(0)
@@ -228,9 +224,7 @@ def generate_period_report(
 📈 Общие показатели:
 Количество объектов: {len(objects)}
 Общий доход: {format_currency(total_income)}
-Общие расходы (объекты): {format_currency(total_expenses)}
 Расходы фирмы: {format_currency(company_total)}
-Общие расходы: {format_currency(adjusted_expenses)}
 Общая прибыль: {format_currency(adjusted_profit)}
 Средняя рентабельность: {format_percentage(avg_profitability)}
 
