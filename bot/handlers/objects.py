@@ -39,6 +39,7 @@ from database.crud import (
     delete_advance,
     create_object_log,
     get_object_logs,
+    delete_object,
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -1793,4 +1794,61 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
         ),
         user_id=user.id,
     )
+
+
+@router.callback_query(F.data.startswith("object:delete_request:"))
+async def request_delete_object(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    object_id = int(callback.data.split(":")[2])
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    await send_new_message(
+        callback,
+        "🗑 <b>Удаление объекта</b>\n\n"
+        f"Вы собираетесь удалить объект <b>{obj.name}</b>.\n"
+        "Будут удалены все связанные данные: расходы, авансы, файлы и логи.\n\n"
+        "Действие необратимо. Подтвердите, если уверены.",
+        parse_mode="HTML",
+        reply_markup=get_confirm_keyboard(f"object:delete_confirm:{object_id}", f"object:view:{object_id}"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:delete_confirm:"))
+async def confirm_delete_object(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    object_id = int(callback.data.split(":")[3])
+
+    success = await delete_object(session, object_id)
+    if not success:
+        await callback.answer("❌ Не удалось удалить объект", show_alert=True)
+        return
+
+    objects = await get_objects_by_status(session, ObjectStatus.COMPLETED)
+    if objects:
+        text = (
+            "🗑 <b>Объект удалён</b>\n\n"
+            "Запись удалена без возможности восстановления.\n\n"
+            "Выберите другой объект из списка завершённых:"
+        )
+    else:
+        text = "🗑 <b>Объект удалён</b>\n\nВ списке завершённых объектов больше нет записей."
+
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=get_objects_list_keyboard(objects, ObjectStatus.COMPLETED),
+    )
+    await callback.answer("🗑 Удалено")
 

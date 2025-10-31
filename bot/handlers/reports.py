@@ -12,7 +12,8 @@ from database.crud import (
     get_objects_by_status,
     get_object_by_id,
     get_files_by_object,
-    get_objects_by_period
+    get_objects_by_period,
+    get_company_expenses_for_period
 )
 from bot.keyboards.reports_kb import (
     get_period_selection,
@@ -156,7 +157,9 @@ async def process_year(message: Message, user: User, session: AsyncSession, stat
     objects = await get_objects_by_period(session, start_date, end_date)
     
     # Генерируем отчет
-    report = generate_period_report(objects, f"{year} год")
+    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
+
+    report = generate_period_report(objects, f"{year} год", company_totals)
     
     await message.answer(report, parse_mode="HTML")
 
@@ -218,7 +221,9 @@ async def process_month(message: Message, user: User, session: AsyncSession, sta
     ]
     month_name = month_names[date_obj.month - 1]
     
-    report = generate_period_report(objects, f"{month_name} {date_obj.year}")
+    company_totals = await get_company_expenses_for_period(session, start_date, end_date)
+
+    report = generate_period_report(objects, f"{month_name} {date_obj.year}", company_totals)
     
     await message.answer(report, parse_mode="HTML")
 
@@ -298,7 +303,9 @@ async def process_date_to(message: Message, user: User, session: AsyncSession, s
     
     # Генерируем отчет
     period_str = f"{date_from.strftime('%d.%m.%Y')} — {date_to.strftime('%d.%m.%Y')}"
-    report = generate_period_report(objects, period_str)
+    company_totals = await get_company_expenses_for_period(session, date_from, date_to)
+
+    report = generate_period_report(objects, period_str, company_totals)
     
     await message.answer(report, parse_mode="HTML")
 

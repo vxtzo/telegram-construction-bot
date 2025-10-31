@@ -143,6 +143,12 @@ def get_object_card_keyboard(
                     callback_data=f"object:restore_request:{object_id}"
                 )
             )
+            builder.row(
+                InlineKeyboardButton(
+                    text="🗑 Удалить объект",
+                    callback_data=f"object:delete_request:{object_id}"
+                )
+            )
     
     # Кнопка Назад
     back_status = "active" if status == ObjectStatus.ACTIVE else "completed"

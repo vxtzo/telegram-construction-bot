@@ -30,6 +30,7 @@ def get_main_menu(user_role: UserRole) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📊 Создать отчёт")
         )
         builder.row(
+            KeyboardButton(text="💼 Расходы фирмы"),
             KeyboardButton(text="👥 Управление пользователями")
         )
     
@@ -76,5 +77,6 @@ def get_skip_or_cancel() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
     )
     return builder.as_markup()
+
 
 

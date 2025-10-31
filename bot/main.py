@@ -16,7 +16,7 @@ from database.crud import create_user, get_user_by_telegram_id
 from bot.middlewares.auth_middleware import AuthMiddleware
 
 # Импортируем все роутеры
-from bot.handlers import start, objects, add_object, expenses, reports, admin
+from bot.handlers import start, objects, add_object, expenses, reports, admin, company_expenses
 
 # Настройка логирования
 logging.basicConfig(
@@ -119,6 +119,7 @@ async def main():
     dp.include_router(expenses.router)
     dp.include_router(reports.router)
     dp.include_router(admin.router)
+    dp.include_router(company_expenses.router)
     
     logger.info("✅ Роутеры зарегистрированы")
     
@@ -147,5 +148,6 @@ if __name__ == "__main__":
         logger.info("⚠️ Бот остановлен пользователем (Ctrl+C)")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+
 
 

@@ -197,6 +197,64 @@ class File(Base):
         return f"<File(id={self.id}, type={self.file_type}, filename='{self.filename}')>"
 
 
+class CompanyExpense(Base):
+    """Разовые расходы компании"""
+
+    __tablename__ = "company_expenses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    added_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self):
+        return f"<CompanyExpense(id={self.id}, category='{self.category}', amount={self.amount})>"
+
+
+class CompanyRecurringExpense(Base):
+    """Ежемесячные расходы компании"""
+
+    __tablename__ = "company_recurring_expenses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    period_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    added_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self):
+        return f"<CompanyRecurringExpense(id={self.id}, category='{self.category}', {self.period_month}.{self.period_year})>"
+
+
+class CompanyExpenseLog(Base):
+    """Логи действий по расходам компании"""
+
+    __tablename__ = "company_expense_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    expense_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self):
+        return f"<CompanyExpenseLog(id={self.id}, type={self.expense_type}, action={self.action})>"
+
+
 class ObjectLogType(str, enum.Enum):
     """Типы событий для логов объекта"""
 

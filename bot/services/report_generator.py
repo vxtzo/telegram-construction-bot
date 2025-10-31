@@ -3,7 +3,7 @@
 """
 from datetime import datetime
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 from database.models import ConstructionObject, File, FileType
 from bot.services.calculations import calculate_profit_data, format_currency, format_percentage
@@ -180,7 +180,11 @@ def generate_short_object_card(obj: ConstructionObject) -> str:
     return card.strip()
 
 
-def generate_period_report(objects: List[ConstructionObject], period_str: str) -> str:
+def generate_period_report(
+    objects: List[ConstructionObject],
+    period_str: str,
+    company_expenses: Optional[dict] = None,
+) -> str:
     """
     Генерация сводного отчета за период
     
@@ -192,8 +196,10 @@ def generate_period_report(objects: List[ConstructionObject], period_str: str) -
         Сводный отчет
     """
     
-    if not objects:
-        return f"📊 Отчет за {period_str}\n\nНет объектов за указанный период."
+    company_data = company_expenses or {"one_time": Decimal(0), "recurring": Decimal(0), "total": Decimal(0)}
+
+    if not objects and company_data["total"] == 0:
+        return f"📊 Отчет за {period_str}\n\nНет данных за указанный период."
     
     # Считаем агрегированные показатели
     total_income = Decimal(0)
@@ -206,8 +212,14 @@ def generate_period_report(objects: List[ConstructionObject], period_str: str) -
         total_profit += data['total_profit']
         total_expenses += data['total_expenses']
     
-    # Средняя рентабельность
-    avg_profitability = (total_profit / total_income * 100) if total_income > 0 else Decimal(0)
+    company_total = company_data.get("total", Decimal(0))
+    company_one_time = company_data.get("one_time", Decimal(0))
+    company_recurring = company_data.get("recurring", Decimal(0))
+
+    adjusted_expenses = total_expenses + company_total
+    adjusted_profit = total_profit - company_total
+
+    avg_profitability = (adjusted_profit / total_income * 100) if total_income > 0 else Decimal(0)
     
     report = f"""
 📊 СВОДНЫЙ ОТЧЕТ ЗА {period_str.upper()}
@@ -216,21 +228,31 @@ def generate_period_report(objects: List[ConstructionObject], period_str: str) -
 📈 Общие показатели:
 Количество объектов: {len(objects)}
 Общий доход: {format_currency(total_income)}
-Общие расходы: {format_currency(total_expenses)}
-Общая прибыль: {format_currency(total_profit)}
+Общие расходы (объекты): {format_currency(total_expenses)}
+Расходы фирмы: {format_currency(company_total)}
+Общие расходы: {format_currency(adjusted_expenses)}
+Общая прибыль: {format_currency(adjusted_profit)}
 Средняя рентабельность: {format_percentage(avg_profitability)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🏢 Расходы фирмы:
+   • Разовые: {format_currency(company_one_time)}
+   • Ежемесячные: {format_currency(company_recurring)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📋 Список объектов:
 """
-    
-    # Добавляем краткую информацию по каждому объекту
-    for i, obj in enumerate(objects, 1):
-        data = calculate_profit_data(obj)
-        report += f"\n{i}. {obj.name}\n"
-        report += f"   💰 Прибыль: {format_currency(data['total_profit'])}\n"
-        report += f"   📈 Рентабельность: {format_percentage(data['profitability'])}\n"
+
+    if objects:
+        for i, obj in enumerate(objects, 1):
+            data = calculate_profit_data(obj)
+            report += f"\n{i}. {obj.name}\n"
+            report += f"   💰 Прибыль: {format_currency(data['total_profit'])}\n"
+            report += f"   📈 Рентабельность: {format_percentage(data['profitability'])}\n"
+    else:
+        report += "\nНет объектов за период."
     
     return report.strip()
 
