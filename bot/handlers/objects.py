@@ -58,6 +58,7 @@ ADVANCES_WORK_PAGE_SIZE = 10
 LOGS_PAGE_SIZE = 10
 UNSPECIFIED_WORK_TYPE_LABEL = "Без указания вида работ"
 DEFAULT_WORK_TYPE_TOKEN = "default"
+DEFAULT_EXPENSE_TYPE_TOKEN = "all"
 
 
 EXPENSE_TYPE_ICONS = {
@@ -67,6 +68,15 @@ EXPENSE_TYPE_ICONS = {
 }
 
 
+EXPENSE_TYPE_TOKENS = {
+    ExpenseType.SUPPLIES: "supplies",
+    ExpenseType.TRANSPORT: "transport",
+    ExpenseType.OVERHEAD: "overhead",
+}
+
+EXPENSE_TOKEN_TO_TYPE = {value: key for key, value in EXPENSE_TYPE_TOKENS.items()}
+
+
 def _expense_type_label(expense_type: ExpenseType) -> str:
     mapping = {
         ExpenseType.SUPPLIES: "Расходники",
@@ -74,6 +84,14 @@ def _expense_type_label(expense_type: ExpenseType) -> str:
         ExpenseType.OVERHEAD: "Накладные",
     }
     return mapping.get(expense_type, expense_type.value)
+
+
+def _expense_type_token(expense_type: ExpenseType) -> str:
+    return EXPENSE_TYPE_TOKENS.get(expense_type, DEFAULT_EXPENSE_TYPE_TOKEN)
+
+
+def _expense_type_from_token(token: str) -> ExpenseType | None:
+    return EXPENSE_TOKEN_TO_TYPE.get(token)
 
 
 def _get_expense_status(expense):
@@ -99,7 +117,7 @@ def _build_navigation_buttons(prefix: str, object_id: int, page: int, total_page
     return buttons
 
 
-def _build_worktype_navigation(prefix: str, object_id: int, page: int, total_pages: int, token: str) -> list[InlineKeyboardButton]:
+def _build_token_navigation(prefix: str, object_id: int, page: int, total_pages: int, token: str) -> list[InlineKeyboardButton]:
     buttons: list[InlineKeyboardButton] = []
     if page > 1:
         buttons.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"{prefix}:{object_id}:{page - 1}:{token}"))
@@ -151,16 +169,15 @@ async def _log_object_action(
     )
 
 
-async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
+async def _send_expenses_overview(callback: CallbackQuery, session: AsyncSession, object_id: int) -> None:
     obj = await get_object_by_id(session, object_id, load_relations=False)
     if not obj:
         await callback.answer("❌ Объект не найден", show_alert=True)
         return
 
     expenses = await get_expenses_by_object(session, object_id)
-    total = len(expenses)
 
-    if total == 0:
+    if not expenses:
         await send_new_message(
             callback,
             f"📋 <b>Расходы объекта</b>\n\n🏗️ {obj.name}\n\nПока нет добавленных расходов.",
@@ -171,49 +188,75 @@ async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, ob
         )
         return
 
-    total_pages = math.ceil(total / EXPENSES_PAGE_SIZE)
-    page = _normalize_page(page, total_pages)
-    start = (page - 1) * EXPENSES_PAGE_SIZE
-    current_items = expenses[start:start + EXPENSES_PAGE_SIZE]
+    overall_total = sum((expense.amount for expense in expenses), Decimal(0))
+
+    grouped: dict[ExpenseType, dict[str, object]] = {}
+    for expense in expenses:
+        bucket = grouped.setdefault(
+            expense.type,
+            {
+                "total": Decimal(0),
+                "count": 0,
+                "personal_pending": 0,
+                "personal_total": Decimal(0),
+                "company_total": Decimal(0),
+            },
+        )
+        bucket["total"] += expense.amount
+        bucket["count"] += 1
+        if expense.payment_source == PaymentSource.PERSONAL:
+            bucket["personal_total"] += expense.amount
+            if expense.compensation_status == CompensationStatus.PENDING:
+                bucket["personal_pending"] += 1
+        else:
+            bucket["company_total"] += expense.amount
+
+    type_rows = []
+    for expense_type in [ExpenseType.SUPPLIES, ExpenseType.TRANSPORT, ExpenseType.OVERHEAD]:
+        bucket = grouped.get(expense_type)
+        if not bucket:
+            continue
+        label = EXPENSE_TYPE_TITLES.get(expense_type, expense_type.value)
+        token = _expense_type_token(expense_type)
+        total = bucket["total"]
+        count = bucket["count"]
+        pending = bucket["personal_pending"]
+        personal_total = bucket["personal_total"]
+        company_total = bucket["company_total"]
+
+        summary_lines = [
+            f"\n⚙️ <b>{label}</b>",
+            f"   💰 Потрачено: {format_currency(total)}",
+            f"   📄 Записей: {count}",
+        ]
+        if personal_total > 0 or pending:
+            summary_lines.append(
+                f"   👤 Оплачено прорабом: {format_currency(personal_total)}"
+                + (f" • к компенсации: {pending}" if pending else "")
+            )
+        if company_total > 0:
+            summary_lines.append(f"   💳 Оплачено фирмой: {format_currency(company_total)}")
+
+        type_rows.append((label, token, summary_lines, total))
 
     lines = [
         "📋 <b>Расходы объекта</b>",
         f"🏗️ {obj.name}",
-        f"Страница {page}/{total_pages}",
+        f"Всего расходов: {len(expenses)}",
+        f"Общая сумма: {format_currency(overall_total)}",
         "━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>По категориям:</b>",
     ]
 
-    for idx, expense in enumerate(current_items, start=start + 1):
-        status_icon, status_text = _get_expense_status(expense)
-        type_icon = EXPENSE_TYPE_ICONS.get(expense.type, "💰")
-        date_str = expense.date.strftime("%d.%m.%Y")
-        amount_str = format_currency(expense.amount)
-        has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
-        receipt_note = " • 📎 Чек прикреплён" if has_receipt else ""
-
-        lines.append(
-            f"\n{idx}. {type_icon} {status_icon} {date_str} • {amount_str}\n"
-            f"   {expense.description[:80]}\n"
-            f"   <i>{status_text}{receipt_note}</i>"
-        )
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"Всего расходов: {total}")
-
     keyboard = InlineKeyboardBuilder()
-    for expense in current_items:
-        status_icon, _ = _get_expense_status(expense)
-        nav_text = f"{status_icon} {format_currency(expense.amount)} • {expense.date.strftime('%d.%m')}"
+    for label, token, summary_lines, total in type_rows:
+        lines.extend(summary_lines)
         keyboard.row(
             InlineKeyboardButton(
-                text=nav_text,
-                callback_data=f"expense:detail:{expense.id}:{object_id}:{page}"
+                text=f"{label} • {format_currency(total)}",
+                callback_data=f"expense:type:{object_id}:1:{token}"
             )
         )
-
-    nav_buttons = _build_navigation_buttons("object:view_expenses", object_id, page, total_pages)
-    if nav_buttons:
-        keyboard.row(*nav_buttons)
 
     keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
 
@@ -221,7 +264,103 @@ async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, ob
         callback,
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=keyboard.as_markup()
+        reply_markup=keyboard.as_markup(),
+    )
+
+
+async def _send_expenses_type_page(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    object_id: int,
+    expense_token: str,
+    page: int,
+) -> None:
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    expense_type = _expense_type_from_token(expense_token)
+    if expense_type is None:
+        await _send_expenses_overview(callback, session, object_id)
+        return
+
+    expenses = await get_expenses_by_object(session, object_id)
+    filtered = [expense for expense in expenses if expense.type == expense_type]
+
+    if not filtered:
+        await _send_expenses_overview(callback, session, object_id)
+        return
+
+    total = len(filtered)
+    total_pages = math.ceil(total / EXPENSES_PAGE_SIZE)
+    page = _normalize_page(page, total_pages)
+    start = (page - 1) * EXPENSES_PAGE_SIZE
+    current_items = filtered[start:start + EXPENSES_PAGE_SIZE]
+
+    total_amount = sum((expense.amount for expense in filtered), Decimal(0))
+    personal_total = sum((expense.amount for expense in filtered if expense.payment_source == PaymentSource.PERSONAL), Decimal(0))
+    company_total = total_amount - personal_total
+    pending_count = sum(
+        1
+        for expense in filtered
+        if expense.payment_source == PaymentSource.PERSONAL and expense.compensation_status == CompensationStatus.PENDING
+    )
+
+    label = EXPENSE_TYPE_TITLES.get(expense_type, expense_type.value)
+
+    lines = [
+        f"📋 <b>{label}</b>",
+        f"🏗️ {obj.name}",
+        f"Страница {page}/{total_pages}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"Всего расходов: {total}",
+        f"Сумма расходов: {format_currency(total_amount)}",
+        f"💳 Оплачено фирмой: {format_currency(company_total)}",
+        f"👤 Оплачено прорабом: {format_currency(personal_total)}",
+    ]
+    if pending_count:
+        lines.append(f"⏳ К компенсации: {pending_count}")
+
+    lines.append("\n📄 Записи:")
+
+    keyboard = InlineKeyboardBuilder()
+    for idx, expense in enumerate(current_items, start=start + 1):
+        status_icon, status_text = _get_expense_status(expense)
+        date_str = expense.date.strftime("%d.%m.%Y")
+        amount_str = format_currency(expense.amount)
+        has_receipt = bool(expense.photo_url and expense.photo_url.startswith("file_"))
+        receipt_note = " • 📎 Чек" if has_receipt else ""
+
+        lines.append(
+            f"\n{idx}. {status_icon} {date_str} • {amount_str}\n"
+            f"   {expense.description[:80]}{receipt_note}\n"
+            f"   <i>{status_text}</i>"
+        )
+
+        keyboard.row(
+            InlineKeyboardButton(
+                text=f"{status_icon} {amount_str} • {date_str}",
+                callback_data=f"expense:detail:{expense.id}:{object_id}:{page}:{expense_token}"
+            )
+        )
+
+    nav_buttons = _build_token_navigation("expense:type", object_id, page, total_pages, expense_token)
+    if nav_buttons:
+        keyboard.row(*nav_buttons)
+
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К типам расходов",
+            callback_data=f"object:view_expenses:{object_id}"
+        )
+    )
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
     )
 
 
@@ -430,7 +569,7 @@ async def _send_advances_worktype_page(
             )
         )
 
-    nav_buttons = _build_worktype_navigation("advance:worktype", object_id, page, total_pages, work_type_token)
+    nav_buttons = _build_token_navigation("advance:worktype", object_id, page, total_pages, work_type_token)
     if nav_buttons:
         keyboard.row(*nav_buttons)
 
@@ -456,7 +595,13 @@ EXPENSE_TYPE_TITLES = {
 }
 
 
-def _build_expense_detail_view(expense, user_role: UserRole, object_id: int, page: int):
+def _build_expense_detail_view(
+    expense,
+    user_role: UserRole,
+    object_id: int,
+    page: int,
+    expense_token: str = DEFAULT_EXPENSE_TYPE_TOKEN,
+):
     status_icon, status_text = _get_expense_status(expense)
     type_icon = EXPENSE_TYPE_ICONS.get(expense.type, "💰")
     type_title = EXPENSE_TYPE_TITLES.get(expense.type, "Расход")
@@ -487,7 +632,7 @@ def _build_expense_detail_view(expense, user_role: UserRole, object_id: int, pag
         keyboard.row(
             InlineKeyboardButton(
                 text="✅ Отметить как компенсировано",
-                callback_data=f"expense:compensate:{expense.id}:{object_id}:{page}"
+                callback_data=f"expense:compensate:{expense.id}:{object_id}:{page}:{expense_token}"
             )
         )
 
@@ -495,20 +640,25 @@ def _build_expense_detail_view(expense, user_role: UserRole, object_id: int, pag
         keyboard.row(
             InlineKeyboardButton(
                 text="✏️ Редактировать",
-                callback_data=f"expense:edit:{expense.id}:{object_id}:{page}"
+                callback_data=f"expense:edit:{expense.id}:{object_id}:{page}:{expense_token}"
             )
         )
         keyboard.row(
             InlineKeyboardButton(
                 text="🗑 Удалить",
-                callback_data=f"expense:delete_request:{expense.id}:{object_id}:{page}"
+                callback_data=f"expense:delete_request:{expense.id}:{object_id}:{page}:{expense_token}"
             )
         )
 
+    if expense_token == DEFAULT_EXPENSE_TYPE_TOKEN:
+        back_callback = f"object:view_expenses:{object_id}"
+    else:
+        back_callback = f"expense:type:{object_id}:{page}:{expense_token}"
+
     keyboard.row(
         InlineKeyboardButton(
-            text="🔙 К списку расходов",
-            callback_data=f"object:view_expenses:{object_id}:{page}"
+            text="🔙 Назад",
+            callback_data=back_callback
         )
     )
 
@@ -903,9 +1053,20 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
     """Просмотр списка расходов объекта"""
     parts = callback.data.split(":")
     object_id = int(parts[2])
-    page = int(parts[3]) if len(parts) > 3 else 1
+    expense_token = parts[3] if len(parts) > 3 else DEFAULT_EXPENSE_TYPE_TOKEN
 
-    await _send_expenses_page(callback, session, object_id, page)
+    await _send_expenses_overview(callback, session, object_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("expense:type:"))
+async def view_expenses_by_type(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.split(":")
+    object_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
+    expense_token = parts[4] if len(parts) > 4 else DEFAULT_EXPENSE_TYPE_TOKEN
+
+    await _send_expenses_type_page(callback, session, object_id, expense_token, page)
     await callback.answer()
 
 
@@ -944,6 +1105,7 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
     expense_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
+    expense_token = parts[5] if len(parts) > 5 else DEFAULT_EXPENSE_TYPE_TOKEN
 
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
@@ -952,7 +1114,7 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
 
     object_id = object_id or expense.object_id
 
-    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page, expense_token)
 
     await send_new_message(
         callback,
@@ -967,6 +1129,47 @@ async def view_expense_detail(callback: CallbackQuery, user: User, session: Asyn
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("expense:compensate:"))
+async def compensate_expense(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[2])
+    object_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 else 1
+    expense_token = parts[5] if len(parts) > 5 else DEFAULT_EXPENSE_TYPE_TOKEN
+
+    expense = await update_compensation_status(session, expense_id, CompensationStatus.COMPENSATED)
+
+    if not expense:
+        await callback.answer("❌ Ошибка обновления статуса", show_alert=True)
+        return
+
+    await _log_object_action(
+        session=session,
+        object_id=expense.object_id,
+        action=ObjectLogType.EXPENSE_COMPENSATED,
+        description=f"Расход #{expense.id} помечен как компенсированный",
+        user_id=user.id,
+    )
+
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id or expense.object_id, page, expense_token)
+
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+    )
+
+    if has_receipt:
+        await _send_expense_receipt(callback.message, session, expense)
+
+    await callback.answer("✅ Компенсация отмечена!", show_alert=True)
+
+
 @router.callback_query(F.data.startswith("expense:edit:"))
 async def start_expense_edit(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     if user.role != UserRole.ADMIN:
@@ -977,6 +1180,7 @@ async def start_expense_edit(callback: CallbackQuery, user: User, session: Async
     expense_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
+    expense_token = parts[5] if len(parts) > 5 else DEFAULT_EXPENSE_TYPE_TOKEN
 
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
@@ -986,7 +1190,12 @@ async def start_expense_edit(callback: CallbackQuery, user: User, session: Async
     object_id = object_id or expense.object_id
 
     await state.set_state(EditExpenseStates.choose_field)
-    await state.update_data(expense_id=expense_id, object_id=object_id, page=page)
+    await state.update_data(
+        expense_id=expense_id,
+        object_id=object_id,
+        page=page,
+        expense_token=expense_token,
+    )
 
     keyboard = InlineKeyboardBuilder()
     keyboard.row(InlineKeyboardButton(text="💰 Сумма", callback_data="expense:edit_field:amount"))
@@ -1040,7 +1249,7 @@ async def choose_expense_field(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="expense:edit_cancel")]
-            ]),
+        ]),
     )
     await callback.answer()
 
@@ -1052,6 +1261,7 @@ async def apply_expense_edit(message: Message, session: AsyncSession, state: FSM
     object_id = data.get("object_id")
     page = data.get("page", 1)
     field = data.get("field")
+    expense_token = data.get("expense_token", DEFAULT_EXPENSE_TYPE_TOKEN)
 
     if user.role != UserRole.ADMIN or not expense_id or not field:
         await message.answer("❌ Недостаточно прав или некорректное состояние. Попробуйте снова.")
@@ -1097,7 +1307,7 @@ async def apply_expense_edit(message: Message, session: AsyncSession, state: FSM
 
     await state.clear()
 
-    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page, expense_token)
     await message.answer("✅ Изменения сохранены.")
     await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
@@ -1143,6 +1353,7 @@ async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSe
     expense_id = data.get("expense_id")
     object_id = data.get("object_id")
     page = data.get("page", 1)
+    expense_token = data.get("expense_token", DEFAULT_EXPENSE_TYPE_TOKEN)
 
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
@@ -1164,7 +1375,7 @@ async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSe
 
     await callback.answer("✅ Источник оплаты обновлён", show_alert=True)
 
-    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page, expense_token)
     await send_new_message(
         callback,
         text,
@@ -1194,6 +1405,7 @@ async def cancel_expense_edit(callback: CallbackQuery, session: AsyncSession, st
     expense_id = data.get("expense_id")
     object_id = data.get("object_id")
     page = data.get("page", 1)
+    expense_token = data.get("expense_token", DEFAULT_EXPENSE_TYPE_TOKEN)
 
     if not expense_id:
         await callback.answer("❌ Отмена", show_alert=True)
@@ -1206,7 +1418,7 @@ async def cancel_expense_edit(callback: CallbackQuery, session: AsyncSession, st
 
     object_id = object_id or expense.object_id
 
-    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page)
+    text, reply_markup, has_receipt = _build_expense_detail_view(expense, user.role, object_id, page, expense_token)
     await send_new_message(
         callback,
         text,
@@ -1230,6 +1442,7 @@ async def request_expense_delete(callback: CallbackQuery, user: User, session: A
     expense_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
+    expense_token = parts[5] if len(parts) > 5 else DEFAULT_EXPENSE_TYPE_TOKEN
 
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
@@ -1242,8 +1455,8 @@ async def request_expense_delete(callback: CallbackQuery, user: User, session: A
         callback,
         "⚠️ Вы уверены, что хотите удалить этот расход?",
         reply_markup=get_confirm_keyboard(
-            f"expense:delete_confirm:{expense_id}:{object_id}:{page}",
-            f"expense:detail:{expense_id}:{object_id}:{page}"
+            f"expense:delete_confirm:{expense_id}:{object_id}:{page}:{expense_token}",
+            f"expense:detail:{expense_id}:{object_id}:{page}:{expense_token}"
         ),
     )
     await callback.answer()
@@ -1259,12 +1472,13 @@ async def confirm_expense_delete(callback: CallbackQuery, user: User, session: A
     expense_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
+    expense_token = parts[5] if len(parts) > 5 else DEFAULT_EXPENSE_TYPE_TOKEN
 
     expense = await get_expense_by_id(session, expense_id)
     if not expense:
         await callback.answer("❌ Расход не найден", show_alert=True)
         return
-
+    
     object_id = object_id or expense.object_id
 
     success = await delete_expense(session, expense_id)
@@ -1275,14 +1489,17 @@ async def confirm_expense_delete(callback: CallbackQuery, user: User, session: A
     await state.clear()
     await callback.answer("🗑 Расход удалён", show_alert=True)
 
-    await _send_expenses_page(callback, session, object_id, page)
+    if expense_token == DEFAULT_EXPENSE_TYPE_TOKEN:
+        await _send_expenses_overview(callback, session, object_id)
+    else:
+        await _send_expenses_type_page(callback, session, object_id, expense_token, page)
 
     await _log_object_action(
         session=session,
         object_id=expense.object_id,
         action=ObjectLogType.EXPENSE_DELETED,
         description=(
-            f"Удален расход #{expense.id}: {_display_work_type(expense.type)} — "
+            f"Удален расход #{expense.id}: {_expense_type_label(expense.type)} — "
             f"{format_currency(expense.amount)}"
         ),
         user_id=user.id,
