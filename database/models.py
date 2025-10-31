@@ -116,6 +116,7 @@ class ConstructionObject(Base):
     expenses: Mapped[list["Expense"]] = relationship("Expense", back_populates="construction_object", cascade="all, delete-orphan")
     advances: Mapped[list["Advance"]] = relationship("Advance", back_populates="construction_object", cascade="all, delete-orphan")
     files: Mapped[list["File"]] = relationship("File", back_populates="construction_object", cascade="all, delete-orphan")
+    logs: Mapped[list["ObjectLog"]] = relationship("ObjectLog", back_populates="construction_object", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<ConstructionObject(id={self.id}, name='{self.name}', status={self.status})>"
@@ -194,4 +195,37 @@ class File(Base):
     
     def __repr__(self):
         return f"<File(id={self.id}, type={self.file_type}, filename='{self.filename}')>"
+
+
+class ObjectLogType(str, enum.Enum):
+    """Типы событий для логов объекта"""
+
+    EXPENSE_CREATED = "expense_created"
+    EXPENSE_UPDATED = "expense_updated"
+    EXPENSE_DELETED = "expense_deleted"
+    EXPENSE_COMPENSATED = "expense_compensated"
+    ADVANCE_CREATED = "advance_created"
+    ADVANCE_UPDATED = "advance_updated"
+    ADVANCE_DELETED = "advance_deleted"
+    OBJECT_COMPLETED = "object_completed"
+    OBJECT_RESTORED = "object_restored"
+
+
+class ObjectLog(Base):
+    """Логи действий по объекту"""
+
+    __tablename__ = "object_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    object_id: Mapped[int] = mapped_column(Integer, ForeignKey("objects.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    action: Mapped[ObjectLogType] = mapped_column(Enum(ObjectLogType), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    construction_object: Mapped["ConstructionObject"] = relationship("ConstructionObject", back_populates="logs")
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self):
+        return f"<ObjectLog(id={self.id}, object_id={self.object_id}, action={self.action})>"
 

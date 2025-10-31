@@ -10,14 +10,24 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, ExpenseType, FileType, PaymentSource, CompensationStatus
+from database.models import (
+    User,
+    ExpenseType,
+    FileType,
+    PaymentSource,
+    CompensationStatus,
+    ObjectLogType,
+)
 from database.crud import (
     create_expense,
     create_advance,
     get_object_by_id,
     create_file,
     update_compensation_status,
-    get_expense_by_id
+    get_expense_by_id,
+    create_object_log,
+    get_advance_by_id,
+    delete_expense,
 )
 from bot.states.expense_states import AddExpenseStates, AddAdvanceStates
 from bot.keyboards.main_menu import get_cancel_button, get_confirm_keyboard
@@ -31,6 +41,52 @@ from bot.services.calculations import format_currency
 from bot.utils.messaging import delete_message, send_new_message
 
 router = Router()
+
+
+def _expense_type_label(expense_type: ExpenseType) -> str:
+    mapping = {
+        ExpenseType.SUPPLIES: "Расходники",
+        ExpenseType.TRANSPORT: "Транспорт",
+        ExpenseType.OVERHEAD: "Накладные",
+    }
+    return mapping.get(expense_type, expense_type.value)
+
+
+def _work_type_label(value: str | None) -> str:
+    cleaned = (value or "").strip()
+    return cleaned or "Без указания вида работ"
+
+
+async def _log_expense(
+    session: AsyncSession,
+    expense,
+    action: ObjectLogType,
+    description: str,
+    user: User,
+) -> None:
+    await create_object_log(
+        session=session,
+        object_id=expense.object_id,
+        action=action,
+        description=description,
+        user_id=user.id,
+    )
+
+
+async def _log_advance(
+    session: AsyncSession,
+    advance,
+    action: ObjectLogType,
+    description: str,
+    user: User,
+) -> None:
+    await create_object_log(
+        session=session,
+        object_id=advance.object_id,
+        action=action,
+        description=description,
+        user_id=user.id,
+    )
 
 
 # ============ РАСХОДЫ ============
@@ -83,8 +139,8 @@ async def start_add_expense(callback: CallbackQuery, state: FSMContext, session:
     # Определяем текст в зависимости от типа расхода
     type_names = {
         "supplies": "расходников",
-        "transport": "транспортных расходов",
-        "overhead": "накладных расходов"
+        "transport": "транспорт",
+        "overhead": "накладные"
     }
     type_emoji = {
         "supplies": "🧰",
@@ -119,7 +175,7 @@ async def start_add_expense(callback: CallbackQuery, state: FSMContext, session:
 
 
 @router.message(AddExpenseStates.waiting_input, F.text)
-async def process_expense_text(message: Message, state: FSMContext):
+async def process_expense_text(message: Message, user: User, state: FSMContext):
     """Обработка текстового ввода расхода"""
     
     data = await state.get_data()
@@ -166,7 +222,7 @@ async def process_expense_text(message: Message, state: FSMContext):
 
 
 @router.message(AddExpenseStates.waiting_input, F.voice)
-async def process_expense_voice(message: Message, state: FSMContext):
+async def process_expense_voice(message: Message, user: User, state: FSMContext):
     """Обработка голосового ввода расхода"""
     
     data = await state.get_data()
@@ -370,7 +426,20 @@ async def process_expense_photo(message: Message, user: User, session: AsyncSess
     )
     
     await state.clear()
-    
+
+    source_text = "оплачено фирмой" if payment_source == PaymentSource.COMPANY else "оплачено прорабом"
+
+    await _log_expense(
+        session=session,
+        expense=expense,
+        action=ObjectLogType.EXPENSE_CREATED,
+        description=(
+            f"Добавлен расход ({_expense_type_label(expense.type)}): "
+            f"{format_currency(expense.amount)} — {expense.description} ({source_text})"
+        ),
+        user=user,
+    )
+
     await message.answer(
         f"✅ <b>Расход добавлен!</b>\n\n"
         f"Объект: {data['object_name']}\n"
@@ -409,7 +478,20 @@ async def skip_expense_photo(callback: CallbackQuery, user: User, session: Async
     )
     
     await state.clear()
-    
+
+    source_text = "оплачено фирмой" if payment_source == PaymentSource.COMPANY else "оплачено прорабом"
+
+    await _log_expense(
+        session=session,
+        expense=expense,
+        action=ObjectLogType.EXPENSE_CREATED,
+        description=(
+            f"Добавлен расход ({_expense_type_label(expense.type)}): "
+            f"{format_currency(expense.amount)} — {expense.description} ({source_text})"
+        ),
+        user=user,
+    )
+
     await send_new_message(
         callback,
         f"✅ <b>Расход добавлен!</b>\n\n"
@@ -458,7 +540,7 @@ async def start_add_advance(callback: CallbackQuery, state: FSMContext, session:
 
 
 @router.message(AddAdvanceStates.waiting_input, F.text)
-async def process_advance_text(message: Message, state: FSMContext):
+async def process_advance_text(message: Message, user: User, state: FSMContext):
     """Обработка текстового ввода аванса"""
     
     await message.answer("⏳ Обрабатываю...")
@@ -497,7 +579,7 @@ async def process_advance_text(message: Message, state: FSMContext):
 
 
 @router.message(AddAdvanceStates.waiting_input, F.voice)
-async def process_advance_voice(message: Message, state: FSMContext):
+async def process_advance_voice(message: Message, user: User, state: FSMContext):
     """Обработка голосового ввода аванса"""
     
     await message.answer("🎤 Распознаю голос...")
@@ -589,7 +671,18 @@ async def confirm_advance(callback: CallbackQuery, user: User, session: AsyncSes
     )
     
     await state.clear()
-    
+
+    await _log_advance(
+        session=session,
+        advance=advance,
+        action=ObjectLogType.ADVANCE_CREATED,
+        description=(
+            f"Добавлен аванс: {_work_type_label(advance.work_type)} — "
+            f"{format_currency(advance.amount)} для {advance.worker_name}"
+        ),
+        user=user,
+    )
+
     await send_new_message(
         callback,
         f"✅ <b>Аванс добавлен!</b>\n\n"

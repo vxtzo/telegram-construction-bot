@@ -6,6 +6,7 @@ import hashlib
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from typing import Optional
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Message
@@ -13,7 +14,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, ObjectStatus, UserRole, PaymentSource, CompensationStatus, ExpenseType
+from database.models import (
+    User,
+    ObjectStatus,
+    UserRole,
+    PaymentSource,
+    CompensationStatus,
+    ExpenseType,
+    ObjectLogType,
+)
 from database.crud import (
     get_objects_by_status,
     get_object_by_id,
@@ -27,7 +36,9 @@ from database.crud import (
     update_expense,
     get_advance_by_id,
     update_advance,
-    delete_advance
+    delete_advance,
+    create_object_log,
+    get_object_logs,
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
@@ -44,6 +55,7 @@ router = Router()
 
 EXPENSES_PAGE_SIZE = 10
 ADVANCES_WORK_PAGE_SIZE = 10
+LOGS_PAGE_SIZE = 10
 UNSPECIFIED_WORK_TYPE_LABEL = "Без указания вида работ"
 DEFAULT_WORK_TYPE_TOKEN = "default"
 
@@ -53,6 +65,15 @@ EXPENSE_TYPE_ICONS = {
     ExpenseType.TRANSPORT: "🚚",
     ExpenseType.OVERHEAD: "🧾",
 }
+
+
+def _expense_type_label(expense_type: ExpenseType) -> str:
+    mapping = {
+        ExpenseType.SUPPLIES: "Расходники",
+        ExpenseType.TRANSPORT: "Транспорт",
+        ExpenseType.OVERHEAD: "Накладные",
+    }
+    return mapping.get(expense_type, expense_type.value)
 
 
 def _get_expense_status(expense):
@@ -106,6 +127,28 @@ def _make_work_type_token(value: str | None) -> str:
 
 def _is_default_work_type_token(token: str | None) -> bool:
     return not token or token == DEFAULT_WORK_TYPE_TOKEN
+
+
+def _format_user_name(user: User | None) -> str:
+    if not user:
+        return "Система"
+    return user.full_name or user.username or f"ID {user.telegram_id}"
+
+
+async def _log_object_action(
+    session: AsyncSession,
+    object_id: int,
+    action: ObjectLogType,
+    description: str,
+    user_id: Optional[int] = None,
+) -> None:
+    await create_object_log(
+        session=session,
+        object_id=object_id,
+        action=action,
+        description=description,
+        user_id=user_id,
+    )
 
 
 async def _send_expenses_page(callback: CallbackQuery, session: AsyncSession, object_id: int, page: int) -> None:
@@ -552,6 +595,79 @@ def _build_advance_detail_view(
     return "\n".join(lines), keyboard.as_markup()
 
 
+LOG_ACTION_TITLES = {
+    ObjectLogType.EXPENSE_CREATED: "Добавлен расход",
+    ObjectLogType.EXPENSE_UPDATED: "Изменён расход",
+    ObjectLogType.EXPENSE_DELETED: "Удалён расход",
+    ObjectLogType.EXPENSE_COMPENSATED: "Компенсация по расходу",
+    ObjectLogType.ADVANCE_CREATED: "Добавлен аванс",
+    ObjectLogType.ADVANCE_UPDATED: "Изменён аванс",
+    ObjectLogType.ADVANCE_DELETED: "Удалён аванс",
+    ObjectLogType.OBJECT_COMPLETED: "Объект завершён",
+    ObjectLogType.OBJECT_RESTORED: "Объект возвращён в работу",
+}
+
+
+async def _send_logs_page(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    object_id: int,
+    page: int,
+) -> None:
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    logs, total = await get_object_logs(session, object_id, page, LOGS_PAGE_SIZE)
+
+    if total == 0:
+        await send_new_message(
+            callback,
+            f"📜 <b>Логи объекта</b>\n\n🏗️ {obj.name}\n\nПока нет записей.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}")]]
+            ),
+        )
+        return
+
+    total_pages = math.ceil(total / LOGS_PAGE_SIZE)
+    page = _normalize_page(page, total_pages)
+
+    lines = [
+        "📜 <b>Логи объекта</b>",
+        f"🏗️ {obj.name}",
+        f"Страница {page}/{total_pages}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for idx, log in enumerate(logs, start=1 + (page - 1) * LOGS_PAGE_SIZE):
+        timestamp = log.created_at.strftime("%d.%m.%Y %H:%M")
+        actor = _format_user_name(log.user)
+        title = LOG_ACTION_TITLES.get(log.action, log.action.value)
+        lines.append(
+            f"\n{idx}. {timestamp}\n"
+            f"👤 {actor}\n"
+            f"🔖 {title}\n"
+            f"📝 {log.description}"
+        )
+
+    keyboard = InlineKeyboardBuilder()
+    nav_buttons = _build_navigation_buttons("object:view_logs", object_id, page, total_pages)
+    if nav_buttons:
+        keyboard.row(*nav_buttons)
+
+    keyboard.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"object:view:{object_id}"))
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
+
+
 @router.callback_query(F.data.in_(["objects:active", "objects:completed"]))
 async def show_objects_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     """
@@ -671,6 +787,14 @@ async def complete_object(callback: CallbackQuery, user: User, session: AsyncSes
         parse_mode="HTML",
     )
 
+    await _log_object_action(
+        session=session,
+        object_id=obj.id,
+        action=ObjectLogType.OBJECT_COMPLETED,
+        description=f"Объект '{obj.name}' завершён",
+        user_id=user.id,
+    )
+
 
 @router.callback_query(F.data == "object:complete:cancel")
 async def cancel_complete_object(callback: CallbackQuery):
@@ -742,6 +866,14 @@ async def restore_object(callback: CallbackQuery, user: User, session: AsyncSess
     )
     await callback.answer("✅ Объект возвращен")
 
+    await _log_object_action(
+        session=session,
+        object_id=obj.id,
+        action=ObjectLogType.OBJECT_RESTORED,
+        description=f"Объект '{obj.name}' возвращён в работу",
+        user_id=user.id,
+    )
+
 
 @router.callback_query(F.data == "object:restore:cancel")
 async def cancel_restore_object(callback: CallbackQuery):
@@ -774,6 +906,22 @@ async def view_expenses_list(callback: CallbackQuery, user: User, session: Async
     page = int(parts[3]) if len(parts) > 3 else 1
 
     await _send_expenses_page(callback, session, object_id, page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:view_logs:"))
+async def view_object_logs(callback: CallbackQuery, user: User, session: AsyncSession):
+    """Просмотр логов объекта (только для админа)"""
+
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    object_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 1
+
+    await _send_logs_page(callback, session, object_id, page)
     await callback.answer()
 
 
@@ -892,7 +1040,7 @@ async def choose_expense_field(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="expense:edit_cancel")]
-        ]),
+            ]),
     )
     await callback.answer()
 
@@ -956,6 +1104,31 @@ async def apply_expense_edit(message: Message, session: AsyncSession, state: FSM
     if has_receipt:
         await _send_expense_receipt(message, session, expense)
 
+    field_labels = {
+        "amount": "Сумма",
+        "date": "Дата",
+        "description": "Описание",
+    }
+
+    if field == "amount":
+        new_value = format_currency(expense.amount)
+    elif field == "date":
+        new_value = expense.date.strftime("%d.%m.%Y") if expense.date else "—"
+    elif field == "description":
+        new_value = expense.description
+    else:
+        new_value = value
+
+    await _log_object_action(
+        session=session,
+        object_id=expense.object_id,
+        action=ObjectLogType.EXPENSE_UPDATED,
+        description=(
+            f"Обновлен расход #{expense.id}: {field_labels.get(field, field)} → {new_value}"
+        ),
+        user_id=user.id,
+    )
+
 
 @router.callback_query(EditExpenseStates.choose_payment_source, F.data.startswith("expense:edit_payment_source:"))
 async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSession, state: FSMContext, user: User):
@@ -977,11 +1150,14 @@ async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSe
         await callback.answer("❌ Расход не найден", show_alert=True)
         return
 
+    updates = {}
     if new_value == "company":
-        updates = {"payment_source": PaymentSource.COMPANY, "compensation_status": None}
+        updates["payment_source"] = PaymentSource.COMPANY
+        updates["compensation_status"] = None
     else:
         compensation_status = expense.compensation_status or CompensationStatus.PENDING
-        updates = {"payment_source": PaymentSource.PERSONAL, "compensation_status": compensation_status}
+        updates["payment_source"] = PaymentSource.PERSONAL
+        updates["compensation_status"] = compensation_status
 
     expense = await update_expense(session, expense_id, **updates)
     await state.clear()
@@ -998,6 +1174,16 @@ async def apply_expense_payment_source(callback: CallbackQuery, session: AsyncSe
 
     if has_receipt:
         await _send_expense_receipt(callback.message, session, expense)
+
+    source_text = "Оплачено фирмой" if updates["payment_source"] == PaymentSource.COMPANY else "Оплачено прорабом"
+
+    await _log_object_action(
+        session=session,
+        object_id=expense.object_id,
+        action=ObjectLogType.EXPENSE_UPDATED,
+        description=f"Источнику оплаты расхода #{expense.id} присвоено значение: {source_text}",
+        user_id=user.id,
+    )
 
 
 @router.callback_query(F.data == "expense:edit_cancel")
@@ -1074,6 +1260,13 @@ async def confirm_expense_delete(callback: CallbackQuery, user: User, session: A
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
 
+    expense = await get_expense_by_id(session, expense_id)
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    object_id = object_id or expense.object_id
+
     success = await delete_expense(session, expense_id)
     if not success:
         await callback.answer("❌ Не удалось удалить расход", show_alert=True)
@@ -1083,6 +1276,17 @@ async def confirm_expense_delete(callback: CallbackQuery, user: User, session: A
     await callback.answer("🗑 Расход удалён", show_alert=True)
 
     await _send_expenses_page(callback, session, object_id, page)
+
+    await _log_object_action(
+        session=session,
+        object_id=expense.object_id,
+        action=ObjectLogType.EXPENSE_DELETED,
+        description=(
+            f"Удален расход #{expense.id}: {_display_work_type(expense.type)} — "
+            f"{format_currency(expense.amount)}"
+        ),
+        user_id=user.id,
+    )
 
 
 @router.callback_query(F.data.startswith("advance:detail:"))
@@ -1120,7 +1324,7 @@ async def start_advance_edit(callback: CallbackQuery, user: User, session: Async
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else None
     page = int(parts[4]) if len(parts) > 4 else 1
-    work_type_token = parts[5] if len(parts) > 5 else "-"
+    work_type_token = parts[5] if len(parts) > 5 else DEFAULT_WORK_TYPE_TOKEN
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -1240,6 +1444,34 @@ async def apply_advance_edit(message: Message, session: AsyncSession, state: FSM
     await message.answer("✅ Изменения сохранены.")
     await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
+    field_labels = {
+        "worker_name": "Рабочий",
+        "work_type": "Вид работ",
+        "amount": "Сумма",
+        "date": "Дата",
+    }
+
+    if field == "amount":
+        new_value = format_currency(advance.amount)
+    elif field == "date":
+        new_value = advance.date.strftime("%d.%m.%Y") if advance.date else "—"
+    elif field == "worker_name":
+        new_value = advance.worker_name
+    elif field == "work_type":
+        new_value = _display_work_type(advance.work_type)
+    else:
+        new_value = value
+
+    await _log_object_action(
+        session=session,
+        object_id=advance.object_id,
+        action=ObjectLogType.ADVANCE_UPDATED,
+        description=(
+            f"Обновлен аванс #{advance.id}: {field_labels.get(field, field)} → {new_value}"
+        ),
+        user_id=user.id,
+    )
+
 
 @router.callback_query(F.data == "advance:edit_cancel")
 async def cancel_advance_edit(callback: CallbackQuery, session: AsyncSession, state: FSMContext, user: User):
@@ -1282,7 +1514,7 @@ async def request_advance_delete(callback: CallbackQuery, user: User, session: A
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
-    work_token = parts[5] if len(parts) > 5 else "-"
+    work_token = parts[5] if len(parts) > 5 else DEFAULT_WORK_TYPE_TOKEN
 
     advance = await get_advance_by_id(session, advance_id)
     if not advance:
@@ -1312,7 +1544,14 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
     advance_id = int(parts[2])
     object_id = int(parts[3]) if len(parts) > 3 else 0
     page = int(parts[4]) if len(parts) > 4 else 1
-    work_token = parts[5] if len(parts) > 5 else "-"
+    work_token = parts[5] if len(parts) > 5 else DEFAULT_WORK_TYPE_TOKEN
+
+    advance = await get_advance_by_id(session, advance_id)
+    if not advance:
+        await callback.answer("❌ Аванс не найден", show_alert=True)
+        return
+
+    object_id = object_id or advance.object_id
 
     success = await delete_advance(session, advance_id)
     if not success:
@@ -1326,4 +1565,15 @@ async def confirm_advance_delete(callback: CallbackQuery, user: User, session: A
         await _send_advances_overview(callback, session, object_id)
     else:
         await _send_advances_worktype_page(callback, session, object_id, work_token, page)
+
+    await _log_object_action(
+        session=session,
+        object_id=advance.object_id,
+        action=ObjectLogType.ADVANCE_DELETED,
+        description=(
+            f"Удален аванс #{advance.id}: {_display_work_type(advance.work_type)} — "
+            f"{format_currency(advance.amount)} для {advance.worker_name}"
+        ),
+        user_id=user.id,
+    )
 

@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from database.models import (
     User, UserRole, ConstructionObject, ObjectStatus,
     Expense, ExpenseType, Advance, File, FileType,
-    PaymentSource, CompensationStatus
+    PaymentSource, CompensationStatus, ObjectLog, ObjectLogType
 )
 
 
@@ -434,6 +434,60 @@ async def delete_advance(session: AsyncSession, advance_id: int) -> bool:
     )
     await session.commit()
     return result.rowcount > 0
+
+
+# ============ LOG CRUD ============
+
+
+async def create_object_log(
+    session: AsyncSession,
+    object_id: int,
+    action: ObjectLogType,
+    description: str,
+    user_id: Optional[int] = None
+) -> ObjectLog:
+    """Создать запись лога объекта"""
+    log = ObjectLog(
+        object_id=object_id,
+        user_id=user_id,
+        action=action,
+        description=description
+    )
+    session.add(log)
+    await session.commit()
+    await session.refresh(log)
+    return log
+
+
+async def get_object_logs(
+    session: AsyncSession,
+    object_id: int,
+    page: int,
+    page_size: int
+) -> tuple[list[ObjectLog], int]:
+    """Получить логи по объекту с пагинацией"""
+    total_result = await session.execute(
+        select(func.count(ObjectLog.id)).where(ObjectLog.object_id == object_id)
+    )
+    total = total_result.scalar() or 0
+
+    if total == 0:
+        return [], 0
+
+    page = max(page, 1)
+    offset = (page - 1) * page_size
+
+    result = await session.execute(
+        select(ObjectLog)
+        .where(ObjectLog.object_id == object_id)
+        .order_by(ObjectLog.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+        .options(selectinload(ObjectLog.user))
+    )
+
+    logs = list(result.scalars().all())
+    return logs, total
 
 
 # ============ FILE CRUD ============

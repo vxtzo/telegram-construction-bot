@@ -101,6 +101,13 @@ def get_object_card_keyboard(
                 callback_data=f"object:view_expenses:{object_id}"
             )
         )
+        if user_role == UserRole.ADMIN:
+            builder.row(
+                InlineKeyboardButton(
+                    text="📜 Логи объекта",
+                    callback_data=f"object:view_logs:{object_id}:1"
+                )
+            )
         
         # Только админ может завершать объекты
         if user_role == UserRole.ADMIN:
@@ -120,6 +127,13 @@ def get_object_card_keyboard(
                 callback_data=f"object:view_advances:{object_id}"
             )
         )
+        if user_role == UserRole.ADMIN:
+            builder.row(
+                InlineKeyboardButton(
+                    text="📜 Логи объекта",
+                    callback_data=f"object:view_logs:{object_id}:1"
+                )
+            )
 
         # Только админ может вернуть объект
         if user_role == UserRole.ADMIN:

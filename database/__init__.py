@@ -1,7 +1,8 @@
 """Database package"""
 from database.models import (
     Base, User, UserRole, ConstructionObject, ObjectStatus,
-    Expense, ExpenseType, Advance, File, FileType
+    Expense, ExpenseType, Advance, File, FileType,
+    ObjectLog, ObjectLogType
 )
 from database.database import engine, async_session_maker, get_session, init_db, close_db
 from database import crud
@@ -9,8 +10,10 @@ from database import crud
 __all__ = [
     "Base", "User", "UserRole", "ConstructionObject", "ObjectStatus",
     "Expense", "ExpenseType", "Advance", "File", "FileType",
+    "ObjectLog", "ObjectLogType",
     "engine", "async_session_maker", "get_session", "init_db", "close_db",
     "crud"
 ]
+
 
 
