@@ -8,6 +8,8 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import User, UserRole
+from database.crud import get_object_by_id, get_files_by_object
+from bot.handlers.objects import build_documents_menu_content, group_document_files, document_counts
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.objects_kb import get_objects_menu
 from bot.keyboards.reports_kb import get_reports_menu
@@ -17,7 +19,7 @@ router = Router()
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, user: User, state: FSMContext):
+async def cmd_start(message: Message, user: User, state: FSMContext, session: AsyncSession):
     """
     Обработчик команды /start
     
@@ -30,6 +32,31 @@ async def cmd_start(message: Message, user: User, state: FSMContext):
     # Очищаем состояние на всякий случай
     await state.clear()
     
+    # Проверяем deep-link аргументы
+    payload = ""
+    raw_text = message.text or ""
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) > 1:
+        payload = parts[1].strip()
+    if payload:
+        payload = payload.split()[0]
+
+    if payload.startswith("docs_"):
+        try:
+            object_id = int(payload.split("_", 1)[1])
+        except (IndexError, ValueError):
+            await message.answer("❌ Неверная ссылка на документы.")
+        else:
+            obj = await get_object_by_id(session, object_id, load_relations=False)
+            if obj:
+                files = await get_files_by_object(session, object_id)
+                grouped = group_document_files(files)
+                counts = document_counts(grouped)
+                text, markup = build_documents_menu_content(object_id, obj.name, counts)
+                await message.answer(text, parse_mode="HTML", reply_markup=markup)
+                return
+            await message.answer("❌ Объект не найден.")
+
     # Приветственное сообщение
     welcome_text = f"""
 👋 Добро пожаловать, {user.full_name or user.username or 'пользователь'}!

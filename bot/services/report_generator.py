@@ -33,7 +33,11 @@ def _format_positive(value: Decimal) -> str:
     return f"⬜ {_currency(Decimal(0))}"
 
 
-def generate_object_report(obj: ConstructionObject, files: List[File] = None) -> str:
+def generate_object_report(
+    obj: ConstructionObject,
+    files: List[File] = None,
+    bot_username: Optional[str] = None,
+) -> str:
     """
     Генерация текстового отчета по объекту
     
@@ -122,27 +126,42 @@ def generate_object_report(obj: ConstructionObject, files: List[File] = None) ->
         f"📈 Рентабельность: {_percentage(data['profitability'])}",
     ]
 
-    if files:
-        receipts = [f for f in files if f.file_type == FileType.RECEIPT]
-        docs = [f for f in files if f.file_type == FileType.DOCUMENT]
-        photos = [f for f in files if f.file_type == FileType.PHOTO]
+    attachments = files or []
+    receipts = [f for f in attachments if f.file_type == FileType.RECEIPT]
+    docs = [f for f in attachments if f.file_type == FileType.DOCUMENT]
+    photos = [f for f in attachments if f.file_type == FileType.PHOTO]
+    estimates = [f for f in attachments if f.file_type == FileType.ESTIMATE]
+    payrolls = [f for f in attachments if f.file_type == FileType.PAYROLL]
 
-        attachments = []
-        if receipts:
-            attachments.append(f"🧾 Чеки: {len(receipts)} шт.")
-        if docs:
-            attachments.append(f"📄 Документы: {len(docs)} шт.")
-        if photos:
-            attachments.append(f"📷 Фото: {len(photos)} шт.")
+    attachment_lines: list[str] = []
+    if estimates:
+        attachment_lines.append(f"📑 Сметы (PDF): {len(estimates)} шт.")
+    if payrolls:
+        attachment_lines.append(f"👷‍♂️ ФЗП (PDF): {len(payrolls)} шт.")
+    if receipts:
+        attachment_lines.append(f"🧾 Чеки: {len(receipts)} шт.")
+    if docs:
+        attachment_lines.append(f"📄 Документы: {len(docs)} шт.")
+    if photos:
+        attachment_lines.append(f"📷 Фото: {len(photos)} шт.")
 
-        if attachments:
+    attachments_header = "📎 ПРИЛОЖЕНИЯ"
+    if bot_username:
+        attachments_header += f" (<a href=\"https://t.me/{bot_username}?start=docs_{obj.id}\">открыть</a>)"
+
+    if attachment_lines or bot_username:
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━━",
+            "",
+            attachments_header,
+        ])
+        if attachment_lines:
+            lines.extend(["", *attachment_lines])
+        else:
             lines.extend([
                 "",
-                "━━━━━━━━━━━━━━━━━━━",
-                "",
-                "📎 ПРИЛОЖЕНИЯ",
-                "",
-                *attachments,
+                "Пока нет загруженных файлов. Используйте кнопку \"📁 Документы по объекту\" ниже.",
             ])
 
     return "\n".join(lines).strip()

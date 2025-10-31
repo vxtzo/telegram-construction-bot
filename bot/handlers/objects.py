@@ -22,6 +22,7 @@ from database.models import (
     CompensationStatus,
     ExpenseType,
     ObjectLogType,
+    FileType,
 )
 from database.crud import (
     get_objects_by_status,
@@ -40,16 +41,19 @@ from database.crud import (
     create_object_log,
     get_object_logs,
     delete_object,
+    get_files_by_object,
 )
 from bot.keyboards.objects_kb import (
     get_objects_list_keyboard,
     get_object_card_keyboard
 )
-from bot.keyboards.main_menu import get_confirm_keyboard
+from bot.keyboards.main_menu import get_confirm_keyboard, get_cancel_button
 from bot.services.report_generator import generate_object_report
 from bot.services.calculations import format_currency
 from bot.states.expense_states import EditExpenseStates, EditAdvanceStates
-from bot.utils.messaging import delete_message, send_new_message
+from bot.states.object_document_states import ObjectDocumentStates
+from bot.utils.messaging import delete_message, send_new_message, get_bot_username
+from bot.services.file_service import FileService
 
 router = Router()
 
@@ -78,6 +82,28 @@ EXPENSE_TYPE_TOKENS = {
 EXPENSE_TOKEN_TO_TYPE = {value: key for key, value in EXPENSE_TYPE_TOKENS.items()}
 
 
+DOCUMENT_TYPES_ORDER = ["estimate", "payroll"]
+
+DOCUMENT_TYPE_INFO = {
+    "estimate": {
+        "icon": "📑",
+        "label": "Сметы",
+        "singular": "смету",
+        "file_type": FileType.ESTIMATE,
+    },
+    "payroll": {
+        "icon": "👷‍♂️",
+        "label": "ФЗП",
+        "singular": "ФЗП",
+        "file_type": FileType.PAYROLL,
+    },
+}
+
+FILE_TYPE_TO_DOCUMENT_TOKEN = {
+    info["file_type"]: token for token, info in DOCUMENT_TYPE_INFO.items()
+}
+
+
 def _expense_type_label(expense_type: ExpenseType) -> str:
     mapping = {
         ExpenseType.SUPPLIES: "Расходники",
@@ -93,6 +119,42 @@ def _expense_type_token(expense_type: ExpenseType) -> str:
 
 def _expense_type_from_token(token: str) -> ExpenseType | None:
     return EXPENSE_TOKEN_TO_TYPE.get(token)
+
+
+def _document_info(token: str) -> dict | None:
+    return DOCUMENT_TYPE_INFO.get(token)
+
+
+def _document_file_type(token: str) -> FileType | None:
+    info = _document_info(token)
+    if not info:
+        return None
+    return info["file_type"]
+
+
+def group_document_files(files) -> dict[str, list]:
+    grouped: dict[str, list] = {token: [] for token in DOCUMENT_TYPES_ORDER}
+    for file in files or []:
+        token = FILE_TYPE_TO_DOCUMENT_TOKEN.get(file.file_type)
+        if token:
+            grouped.setdefault(token, []).append(file)
+    return grouped
+
+
+def document_counts(grouped: dict[str, list]) -> dict[str, int]:
+    return {token: len(grouped.get(token, [])) for token in DOCUMENT_TYPES_ORDER}
+
+
+def _format_file_size(size: Optional[int]) -> str:
+    if not size or size <= 0:
+        return "—"
+    units = ["Б", "КБ", "МБ", "ГБ"]
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "Б" else f"{int(value)} {unit}"
+        value /= 1024
+    return f"{value:.1f} ГБ"
 
 
 def _get_expense_status(expense):
@@ -168,6 +230,55 @@ async def _log_object_action(
         description=description,
         user_id=user_id,
     )
+
+
+def build_documents_menu_content(
+    object_id: int,
+    object_name: str,
+    counts: dict[str, int],
+) -> tuple[str, InlineKeyboardMarkup]:
+    lines = [
+        "📁 <b>Документы объекта</b>",
+        f"🏗️ {object_name}",
+        "",
+        "Выберите категорию для просмотра или загрузите новый файл:",
+        "",
+    ]
+
+    for token in DOCUMENT_TYPES_ORDER:
+        info = DOCUMENT_TYPE_INFO[token]
+        count = counts.get(token, 0)
+        lines.append(f"{info['icon']} {info['label']}: {count} шт.")
+
+    keyboard = InlineKeyboardBuilder()
+
+    for token in DOCUMENT_TYPES_ORDER:
+        info = DOCUMENT_TYPE_INFO[token]
+        count = counts.get(token, 0)
+        keyboard.row(
+            InlineKeyboardButton(
+                text=f"{info['icon']} {info['label']} ({count})",
+                callback_data=f"object:documents:list:{object_id}:{token}"
+            )
+        )
+
+    for token in DOCUMENT_TYPES_ORDER:
+        info = DOCUMENT_TYPE_INFO[token]
+        keyboard.row(
+            InlineKeyboardButton(
+                text=f"➕ {info['icon']} Добавить {info['singular']}",
+                callback_data=f"object:documents:add:{object_id}:{token}"
+            )
+        )
+
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 Назад к карточке",
+            callback_data=f"object:view:{object_id}"
+        )
+    )
+
+    return "\n".join(lines), keyboard.as_markup()
 
 
 async def _send_expenses_overview(callback: CallbackQuery, session: AsyncSession, object_id: int) -> None:
@@ -868,7 +979,11 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
     files = getattr(obj, "files", []) or []
     
     # Генерируем отчет
-    report_text = generate_object_report(obj, files)
+    bot_username = None
+    if callback.message:
+        bot_username = await get_bot_username(callback.message.bot)
+
+    report_text = generate_object_report(obj, files, bot_username)
     
     # Отправляем отчет с клавиатурой
     await send_new_message(
@@ -878,6 +993,250 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
         reply_markup=get_object_card_keyboard(object_id, obj.status, user.role),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:documents:"))
+async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    object_id = int(parts[2])
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    files = await get_files_by_object(session, object_id)
+    grouped = group_document_files(files)
+    counts = document_counts(grouped)
+
+    text, markup = build_documents_menu_content(object_id, obj.name, counts)
+
+    await send_new_message(
+        callback,
+        text,
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:documents:list:"))
+async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
+    parts = callback.data.split(":")
+    if len(parts) < 5:
+        await callback.answer()
+        return
+
+    object_id = int(parts[3])
+    token = parts[4]
+    info = _document_info(token)
+    file_type = _document_file_type(token)
+
+    if not info or not file_type:
+        await callback.answer()
+        return
+
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    files = await get_files_by_object(session, object_id, file_type=file_type)
+
+    lines = [
+        f"{info['icon']} <b>{info['label']}</b>",
+        f"🏗️ {obj.name}",
+        "",
+    ]
+
+    keyboard = InlineKeyboardBuilder()
+
+    if files:
+        lines.append(f"Всего файлов: {len(files)}")
+        lines.append("")
+
+        for idx, file in enumerate(files, 1):
+            uploaded = file.uploaded_at.strftime("%d.%m.%Y %H:%M") if file.uploaded_at else "—"
+            filename = file.filename or f"{info['label']} #{file.id}"
+            size = _format_file_size(file.file_size)
+            lines.append(f"{idx}. {filename}")
+            lines.append(f"   📅 {uploaded} • 📦 {size}")
+            lines.append("")
+
+            keyboard.row(
+                InlineKeyboardButton(
+                    text=f"{info['icon']} {filename}",
+                    callback_data=f"object:documents:file:{file.id}:{object_id}:{token}"
+                )
+            )
+    else:
+        lines.append("Пока нет загруженных файлов.")
+        lines.append("")
+
+    keyboard.row(
+        InlineKeyboardButton(
+            text=f"➕ {info['icon']} Добавить {info['singular']}",
+            callback_data=f"object:documents:add:{object_id}:{token}"
+        )
+    )
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 Назад к документам",
+            callback_data=f"object:documents:{object_id}"
+        )
+    )
+
+    await send_new_message(
+        callback,
+        "\n".join(lines).strip(),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:documents:add:"))
+async def add_object_document(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    parts = callback.data.split(":")
+    if len(parts) < 5:
+        await callback.answer()
+        return
+
+    object_id = int(parts[3])
+    token = parts[4]
+    info = _document_info(token)
+    file_type = _document_file_type(token)
+
+    if not info or not file_type:
+        await callback.answer()
+        return
+
+    obj = await get_object_by_id(session, object_id, load_relations=False)
+    if not obj:
+        await callback.answer("❌ Объект не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(
+        document_object_id=object_id,
+        document_token=token,
+        document_object_name=obj.name,
+    )
+    await state.set_state(ObjectDocumentStates.waiting_document)
+
+    await send_new_message(
+        callback,
+        f"{info['icon']} <b>Загрузка файла</b>\n\n"
+        f"Объект: <b>{obj.name}</b>\n"
+        f"Категория: <b>{info['label']}</b>\n\n"
+        "Отправьте PDF-файл в ответ на это сообщение.\n"
+        "Можно прикрепить файл из проводника или переслать из другого чата.\n\n"
+        "Если передумали, нажмите Отмена.",
+        parse_mode="HTML",
+        reply_markup=get_cancel_button(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("object:documents:file:"))
+async def send_object_document(callback: CallbackQuery, session: AsyncSession):
+    parts = callback.data.split(":")
+    if len(parts) < 6:
+        await callback.answer()
+        return
+
+    file_id = int(parts[3])
+    object_id = int(parts[4])
+    token = parts[5]
+    info = _document_info(token)
+
+    file = await get_file_by_id(session, file_id)
+    if not file or file.object_id != object_id:
+        await callback.answer("❌ Файл не найден", show_alert=True)
+        return
+
+    caption = f"{info['icon'] if info else '📄'} {file.filename or 'Документ'}"
+
+    file_service = FileService(callback.message.bot)
+    file_data = await file_service.get_file_data(session, file_id)
+
+    try:
+        if file_data:
+            await callback.message.answer_document(
+                document=BufferedInputFile(file_data, filename=file.filename or "document.pdf"),
+                caption=caption,
+            )
+        else:
+            await callback.message.answer_document(
+                document=file.telegram_file_id,
+                caption=caption,
+            )
+        await callback.answer("📄 Файл отправлен")
+    except Exception as exc:
+        await callback.answer("❌ Не удалось отправить файл", show_alert=True)
+        print(f"Ошибка отправки файла {file_id}: {exc}")
+
+
+@router.message(ObjectDocumentStates.waiting_document, F.document)
+async def process_object_document(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    object_id = data.get("document_object_id")
+    token = data.get("document_token")
+    object_name = data.get("document_object_name", "—")
+
+    info = _document_info(token) if token else None
+    file_type = _document_file_type(token) if token else None
+
+    if not object_id or not info or not file_type:
+        await state.clear()
+        await message.answer("⚠️ Не удалось определить категорию документа. Попробуйте снова.")
+        return
+
+    document = message.document
+    mime = (document.mime_type or "").lower() if document.mime_type else ""
+    if "pdf" not in mime:
+        await message.answer("⚠️ Поддерживаются только PDF-файлы. Загрузите документ в формате PDF или нажмите Отмена.")
+        return
+
+    file_service = FileService(message.bot)
+
+    saved_file = await file_service.save_document(
+        session=session,
+        document=document,
+        object_id=object_id,
+        file_type=file_type,
+    )
+
+    if not saved_file:
+        await message.answer("❌ Не удалось сохранить файл. Попробуйте снова")
+        return
+
+    await state.clear()
+
+    size = _format_file_size(document.file_size)
+    await message.answer(
+        f"✅ <b>Файл загружен</b>\n\n"
+        f"Объект: <b>{object_name}</b>\n"
+        f"Категория: <b>{info['label']}</b>\n"
+        f"Название: <b>{document.file_name or saved_file.filename or 'Без имени'}</b>\n"
+        f"Размер: {size}",
+        parse_mode="HTML",
+    )
+
+    files = await get_files_by_object(session, object_id)
+    grouped = group_document_files(files)
+    counts = document_counts(grouped)
+    text, markup = build_documents_menu_content(object_id, object_name, counts)
+
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.message(ObjectDocumentStates.waiting_document)
+async def expect_pdf_document(message: Message):
+    await message.answer("📄 Пожалуйста, отправьте PDF-файл или нажмите Отмена.")
 
 
 @router.callback_query(F.data.startswith("object:complete_request:"))

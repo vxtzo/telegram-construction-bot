@@ -53,6 +53,8 @@ class FileType(str, enum.Enum):
     PHOTO = "photo"
     RECEIPT = "receipt"
     DOCUMENT = "document"
+    ESTIMATE = "estimate"
+    PAYROLL = "payroll"
 
 
 class User(Base):

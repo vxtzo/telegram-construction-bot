@@ -28,7 +28,7 @@ from bot.services.report_generator import (
     generate_object_report,
     generate_period_report
 )
-from bot.utils.messaging import delete_message, send_new_message
+from bot.utils.messaging import delete_message, send_new_message, get_bot_username
 from bot.keyboards.main_menu import get_cancel_button
 
 router = Router()
@@ -83,7 +83,11 @@ async def generate_object_report_callback(callback: CallbackQuery, user: User, s
     files = await get_files_by_object(session, object_id)
     
     # Генерируем отчет
-    report = generate_object_report(obj, files)
+    bot_username = None
+    if callback.message:
+        bot_username = await get_bot_username(callback.message.bot)
+
+    report = generate_object_report(obj, files, bot_username)
     
     await delete_message(callback.message)
 
