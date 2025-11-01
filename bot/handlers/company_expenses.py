@@ -805,7 +805,8 @@ async def delete_one_time(callback: CallbackQuery, user: User, session: AsyncSes
         user_id=user.id,
     )
 
-    await _send_one_time_category(callback, session, category)
+    # Возвращаемся к списку всех расходов
+    await _send_one_time_overview(callback, session)
     await callback.answer("🗑 Удалено")
 
 
@@ -1116,5 +1117,6 @@ async def delete_recurring(callback: CallbackQuery, user: User, session: AsyncSe
         user_id=user.id,
     )
 
-    await _send_recurring_category(callback, session, category)
+    # Возвращаемся к списку всех расходов
+    await _send_recurring_overview(callback, session)
     await callback.answer("🗑 Удалено")
