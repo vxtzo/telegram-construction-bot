@@ -732,10 +732,9 @@ async def view_one_time_expense(callback: CallbackQuery, user: User, session: As
         await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
         return
 
-    # Получаем расход из БД
-    from database.crud import get_company_expenses_by_category
-    expenses = await get_company_expenses_by_category(session, category)
-    expense = next((e for e in expenses if e.id == expense_id), None)
+    # Получаем расход из БД напрямую по ID
+    from database.crud import get_company_expense_by_id
+    expense = await get_company_expense_by_id(session, expense_id)
     
     if not expense:
         await callback.answer("❌ Расход не найден", show_alert=True)
@@ -746,7 +745,7 @@ async def view_one_time_expense(callback: CallbackQuery, user: User, session: As
     lines = [
         f"💸 <b>Разовый расход</b>",
         "",
-        f"📂 Категория: {category}",
+        f"📂 Категория: {expense.category}",
         f"📅 Дата: {date_str}",
         f"💰 Сумма: {format_currency(expense.amount)}",
         f"👤 Добавил: {_format_user_name(expense.user)}",
@@ -1037,9 +1036,9 @@ async def view_recurring_expense(callback: CallbackQuery, user: User, session: A
         await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
         return
 
-    # Получаем расход из БД
-    expenses = await get_company_recurring_by_category(session, category)
-    expense = next((e for e in expenses if e.id == expense_id), None)
+    # Получаем расход из БД напрямую по ID
+    from database.crud import get_company_recurring_expense_by_id
+    expense = await get_company_recurring_expense_by_id(session, expense_id)
     
     if not expense:
         await callback.answer("❌ Расход не найден", show_alert=True)
@@ -1056,7 +1055,7 @@ async def view_recurring_expense(callback: CallbackQuery, user: User, session: A
     lines = [
         f"♻️ <b>Постоянный расход</b>",
         "",
-        f"📂 Категория: {category}",
+        f"📂 Категория: {expense.category}",
         f"💰 Ежемесячно: {format_currency(expense.amount)}",
         f"📅 День оплаты: {expense.day_of_month}-го числа",
         f"📆 Дата начала: {first_payment.strftime('%d.%m.%Y')}",

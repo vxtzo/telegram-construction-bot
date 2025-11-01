@@ -586,6 +586,26 @@ async def create_company_recurring_expense(
     return expense
 
 
+async def get_company_expense_by_id(session: AsyncSession, expense_id: int) -> Optional[CompanyExpense]:
+    """Получить разовый расход по ID"""
+    result = await session.execute(
+        select(CompanyExpense)
+        .where(CompanyExpense.id == expense_id)
+        .options(selectinload(CompanyExpense.user))
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_company_recurring_expense_by_id(session: AsyncSession, expense_id: int) -> Optional[CompanyRecurringExpense]:
+    """Получить постоянный расход по ID"""
+    result = await session.execute(
+        select(CompanyRecurringExpense)
+        .where(CompanyRecurringExpense.id == expense_id)
+        .options(selectinload(CompanyRecurringExpense.user))
+    )
+    return result.scalar_one_or_none()
+
+
 async def delete_company_expense(session: AsyncSession, expense_id: int) -> bool:
     result = await session.execute(
         delete(CompanyExpense).where(CompanyExpense.id == expense_id)
