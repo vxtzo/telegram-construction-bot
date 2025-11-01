@@ -240,11 +240,26 @@ def build_documents_menu_content(
     object_name: str,
     counts: dict[str, int],
 ) -> tuple[str, InlineKeyboardMarkup]:
+    return build_documents_menu_content_with_permissions(
+        object_id,
+        object_name,
+        counts,
+        allow_upload=True,
+    )
+
+
+def build_documents_menu_content_with_permissions(
+    object_id: int,
+    object_name: str,
+    counts: dict[str, int],
+    allow_upload: bool,
+) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
         "📁 <b>Документы объекта</b>",
         f"🏗️ {object_name}",
         "",
-        "Выберите категорию для просмотра или загрузите новый файл:",
+        "Выберите категорию для просмотра"
+        + (" или загрузите новый файл:" if allow_upload else ":"),
         "",
     ]
 
@@ -265,14 +280,15 @@ def build_documents_menu_content(
             )
         )
 
-    for token in DOCUMENT_TYPES_ORDER:
-        info = DOCUMENT_TYPE_INFO[token]
-        keyboard.row(
-            InlineKeyboardButton(
-                text=f"➕ {info['icon']} Добавить {info['singular']}",
-                callback_data=f"object:documents:add:{object_id}:{token}"
+    if allow_upload:
+        for token in DOCUMENT_TYPES_ORDER:
+            info = DOCUMENT_TYPE_INFO[token]
+            keyboard.row(
+                InlineKeyboardButton(
+                    text=f"➕ {info['icon']} Добавить {info['singular']}",
+                    callback_data=f"object:documents:add:{object_id}:{token}"
+                )
             )
-        )
 
     keyboard.row(
         InlineKeyboardButton(
@@ -1016,7 +1032,7 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
 
 
 @router.callback_query(lambda c: (c.data or "").startswith("object:documents:") and (c.data or "").count(":") == 2)
-async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
+async def show_object_documents(callback: CallbackQuery, user: User, session: AsyncSession):
     parts = callback.data.split(":")
     if len(parts) < 3:
         await callback.answer()
@@ -1037,7 +1053,13 @@ async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
     grouped = group_document_files(files)
     counts = document_counts(grouped)
 
-    text, markup = build_documents_menu_content(object_id, obj.name, counts)
+    allow_upload = user.role == UserRole.ADMIN
+    text, markup = build_documents_menu_content_with_permissions(
+        object_id,
+        obj.name,
+        counts,
+        allow_upload=allow_upload,
+    )
 
     await send_new_message(
         callback,
@@ -1049,7 +1071,7 @@ async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
 
 
 @router.callback_query(F.data.startswith("object:documents:list:"))
-async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
+async def list_object_documents(callback: CallbackQuery, user: User, session: AsyncSession):
     parts = callback.data.split(":")
     if len(parts) < 5:
         await callback.answer()
@@ -1065,6 +1087,7 @@ async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
     )
     info = _document_info(token)
     file_type = _document_file_type(token)
+    allow_upload = user.role == UserRole.ADMIN
 
     if not info or not file_type:
         await callback.answer()
@@ -1107,12 +1130,13 @@ async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
         lines.append("Пока нет загруженных файлов.")
         lines.append("")
 
-    keyboard.row(
-        InlineKeyboardButton(
-            text=f"➕ {info['icon']} Добавить {info['singular']}",
-            callback_data=f"object:documents:add:{object_id}:{token}"
+    if allow_upload:
+        keyboard.row(
+            InlineKeyboardButton(
+                text=f"➕ {info['icon']} Добавить {info['singular']}",
+                callback_data=f"object:documents:add:{object_id}:{token}"
+            )
         )
-    )
     keyboard.row(
         InlineKeyboardButton(
             text="🔙 Назад к документам",
@@ -1130,7 +1154,10 @@ async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
 
 
 @router.callback_query(F.data.startswith("object:documents:add:"))
-async def add_object_document(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def add_object_document(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
     parts = callback.data.split(":")
     if len(parts) < 5:
         await callback.answer()
@@ -1219,6 +1246,10 @@ async def handle_unexpected_document_callback(callback: CallbackQuery):
 
 @router.message(ObjectDocumentStates.waiting_document, F.document)
 async def process_object_document(message: Message, user: User, session: AsyncSession, state: FSMContext):
+    if user.role != UserRole.ADMIN:
+        await state.clear()
+        await message.answer("❌ У вас нет прав на загрузку документов.")
+        return
     data = await state.get_data()
     object_id = data.get("document_object_id")
     token = data.get("document_token")
@@ -1266,7 +1297,12 @@ async def process_object_document(message: Message, user: User, session: AsyncSe
     files = await get_files_by_object(session, object_id)
     grouped = group_document_files(files)
     counts = document_counts(grouped)
-    text, markup = build_documents_menu_content(object_id, object_name, counts)
+    text, markup = build_documents_menu_content_with_permissions(
+        object_id,
+        object_name,
+        counts,
+        allow_upload=True,
+    )
 
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 

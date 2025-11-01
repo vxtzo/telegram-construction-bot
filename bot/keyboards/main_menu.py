@@ -1,7 +1,13 @@
 """
 Главное меню и основные клавиатуры
 """
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from database.models import UserRole
 
@@ -16,26 +22,26 @@ def get_main_menu(user_role: UserRole) -> ReplyKeyboardMarkup:
     Returns:
         Клавиатура главного меню
     """
+    if user_role != UserRole.ADMIN:
+        return ReplyKeyboardRemove()
+
     builder = ReplyKeyboardBuilder()
-    
-    # Кнопки доступные всем
+
     builder.row(
         KeyboardButton(text="🏗️ Объекты")
     )
-    
-    # Кнопки только для админа
-    if user_role == UserRole.ADMIN:
-        builder.row(
-            KeyboardButton(text="➕ Добавить объект"),
-            KeyboardButton(text="📊 Создать отчёт")
-        )
-        builder.row(
-            KeyboardButton(text="💼 Расходы фирмы"),
-            KeyboardButton(text="👥 Управление пользователями")
-        )
-    
-    builder.adjust(1)  # По 1 кнопке в ряд
-    
+
+    builder.row(
+        KeyboardButton(text="➕ Добавить объект"),
+        KeyboardButton(text="📊 Создать отчёт")
+    )
+    builder.row(
+        KeyboardButton(text="💼 Расходы фирмы"),
+        KeyboardButton(text="👥 Управление пользователями")
+    )
+
+    builder.adjust(1)
+
     return builder.as_markup(resize_keyboard=True)
 
 

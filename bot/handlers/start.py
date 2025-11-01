@@ -11,6 +11,7 @@ from database.models import User, UserRole, ObjectStatus
 from database.crud import get_object_by_id, get_files_by_object
 from bot.handlers.objects import (
     build_documents_menu_content,
+    build_documents_menu_content_with_permissions,
     group_document_files,
     document_counts,
     build_objects_list_view,
@@ -57,7 +58,12 @@ async def cmd_start(message: Message, user: User, state: FSMContext, session: As
                 files = await get_files_by_object(session, object_id)
                 grouped = group_document_files(files)
                 counts = document_counts(grouped)
-                text, markup = build_documents_menu_content(object_id, obj.name, counts)
+                text, markup = build_documents_menu_content_with_permissions(
+                    object_id,
+                    obj.name,
+                    counts,
+                    allow_upload=user.role == UserRole.ADMIN,
+                )
                 await message.answer(text, parse_mode="HTML", reply_markup=markup)
                 return
             await message.answer("❌ Объект не найден.")
@@ -69,14 +75,22 @@ async def cmd_start(message: Message, user: User, state: FSMContext, session: As
 🏗️ Система управления строительными объектами
 
 Ваша роль: {"👑 Администратор" if user.role == UserRole.ADMIN else "👷 Прораб"}
-
-Выберите действие из меню ниже:
 """
-    
+
+    if user.role == UserRole.ADMIN:
+        await message.answer(
+            (welcome_text + "\nВыберите действие из меню ниже:").strip(),
+            reply_markup=get_main_menu(user.role)
+        )
+        return
+
     await message.answer(
-        welcome_text.strip(),
+        (welcome_text + "\nНиже список текущих объектов:").strip(),
         reply_markup=get_main_menu(user.role)
     )
+
+    text, markup = await build_objects_list_view(session, ObjectStatus.ACTIVE)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 @router.message(Command("help"))
@@ -151,13 +165,25 @@ async def menu_reports(message: Message, user: User, state: FSMContext):
 
 
 @router.callback_query(F.data == "main_menu")
-async def callback_main_menu(callback: CallbackQuery, user: User, state: FSMContext):
+async def callback_main_menu(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     """Вернуться в главное меню"""
     await state.clear()
+    if user.role == UserRole.ADMIN:
+        await send_new_message(
+            callback,
+            "🏠 <b>Главное меню</b>\n\nВыберите действие из меню ниже:",
+            parse_mode="HTML",
+            reply_markup=get_main_menu(user.role),
+        )
+        await callback.answer()
+        return
+
+    text, markup = await build_objects_list_view(session, ObjectStatus.ACTIVE)
     await send_new_message(
         callback,
-        "🏠 <b>Главное меню</b>\n\nВыберите действие из меню ниже:",
+        text,
         parse_mode="HTML",
+        reply_markup=markup,
     )
     await callback.answer()
 
