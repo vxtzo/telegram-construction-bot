@@ -1194,6 +1194,12 @@ async def send_object_document(callback: CallbackQuery, session: AsyncSession):
         print(f"Ошибка отправки файла {file_id}: {exc}")
 
 
+@router.callback_query(F.data.startswith("object:documents"))
+async def handle_unexpected_document_callback(callback: CallbackQuery):
+    logger.warning("Unhandled document callback: %s", callback.data)
+    await callback.answer("⚠️ Не удалось обработать действие. Попробуйте ещё раз.", show_alert=True)
+
+
 @router.message(ObjectDocumentStates.waiting_document, F.document)
 async def process_object_document(message: Message, user: User, session: AsyncSession, state: FSMContext):
     data = await state.get_data()
