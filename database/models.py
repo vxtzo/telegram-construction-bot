@@ -184,7 +184,7 @@ class File(Base):
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     object_id: Mapped[int] = mapped_column(Integer, ForeignKey("objects.id"), nullable=False, index=True)
-    file_type: Mapped[FileType] = mapped_column(Enum(FileType), nullable=False)
+    file_type: Mapped[FileType] = mapped_column(Enum(FileType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)  # ID файла в Telegram
     file_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary)  # Бинарные данные файла
     filename: Mapped[Optional[str]] = mapped_column(String(500))
