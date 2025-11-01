@@ -12,7 +12,8 @@ from database.crud import (
     get_user_by_telegram_id,
     get_all_users,
     delete_user,
-    update_user_active_status
+    update_user_active_status,
+    DeleteUserResult,
 )
 
 router = Router()
@@ -155,11 +156,15 @@ async def cmd_remove_user(message: Message, user: User, session: AsyncSession):
         return
     
     # Удаляем пользователя
-    success = await delete_user(session, telegram_id)
-    
-    if success:
+    result = await delete_user(session, telegram_id)
+
+    if result == DeleteUserResult.DELETED:
         await message.answer(
-            f"✅ Пользователь с Telegram ID {telegram_id} успешно удален."
+            f"✅ Пользователь с Telegram ID {telegram_id} успешно удалён."
+        )
+    elif result == DeleteUserResult.DEACTIVATED:
+        await message.answer(
+            "ℹ️ Пользователь имеет связанные расходы или объекты, поэтому вместо удаления он помечен как неактивный."
         )
     else:
         await message.answer(

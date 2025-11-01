@@ -2,6 +2,7 @@
 CRUD операции для работы с базой данных
 """
 from typing import Optional, List
+from enum import Enum
 from datetime import datetime
 from decimal import Decimal
 import logging
@@ -16,6 +17,13 @@ from database.models import (
     PaymentSource, CompensationStatus, ObjectLog, ObjectLogType,
     CompanyExpense, CompanyRecurringExpense, CompanyExpenseLog
 )
+# ============ USER CRUD ============
+
+
+class DeleteUserResult(Enum):
+    DELETED = "deleted"
+    DEACTIVATED = "deactivated"
+    NOT_FOUND = "not_found"
 
 
 logger = logging.getLogger(__name__)
@@ -74,13 +82,46 @@ async def get_all_users(session: AsyncSession) -> List[User]:
     return list(result.scalars().all())
 
 
-async def delete_user(session: AsyncSession, telegram_id: int) -> bool:
-    """Удалить пользователя"""
-    result = await session.execute(
-        delete(User).where(User.telegram_id == telegram_id)
+async def delete_user(session: AsyncSession, telegram_id: int) -> DeleteUserResult:
+    """Удалить пользователя. Если у пользователя есть связанные данные, он деактивируется."""
+
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if not user:
+        return DeleteUserResult.NOT_FOUND
+
+    user_id = user.id
+
+    dependency_checks = [
+        select(func.count()).select_from(Expense).where(Expense.added_by == user_id),
+        select(func.count()).select_from(Advance).where(Advance.added_by == user_id),
+        select(func.count()).select_from(ConstructionObject).where(ConstructionObject.created_by == user_id),
+        select(func.count()).select_from(CompanyExpense).where(CompanyExpense.added_by == user_id),
+        select(func.count()).select_from(CompanyRecurringExpense).where(CompanyRecurringExpense.added_by == user_id),
+        select(func.count()).select_from(CompanyExpenseLog).where(CompanyExpenseLog.user_id == user_id),
+        select(func.count()).select_from(ObjectLog).where(ObjectLog.user_id == user_id),
+    ]
+
+    has_dependencies = False
+    for query in dependency_checks:
+        result = await session.execute(query)
+        if result.scalar_one() > 0:
+            has_dependencies = True
+            break
+
+    if has_dependencies:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(is_active=False)
+        )
+        await session.commit()
+        return DeleteUserResult.DEACTIVATED
+
+    await session.execute(
+        delete(User).where(User.id == user_id)
     )
     await session.commit()
-    return result.rowcount > 0
+    return DeleteUserResult.DELETED
 
 
 # ============ CONSTRUCTION OBJECT CRUD ============
