@@ -65,7 +65,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255))
     full_name: Mapped[Optional[str]] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.FOREMAN)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]), nullable=False, default=UserRole.FOREMAN)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     
@@ -130,7 +130,7 @@ class Expense(Base):
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     object_id: Mapped[int] = mapped_column(Integer, ForeignKey("objects.id"), nullable=False, index=True)
-    type: Mapped[ExpenseType] = mapped_column(Enum(ExpenseType), nullable=False)
+    type: Mapped[ExpenseType] = mapped_column(Enum(ExpenseType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -140,12 +140,12 @@ class Expense(Base):
     
     # Новые поля для отслеживания оплаты
     payment_source: Mapped[PaymentSource] = mapped_column(
-        Enum(PaymentSource), 
+        Enum(PaymentSource, values_callable=lambda x: [e.value for e in x]), 
         default=PaymentSource.COMPANY, 
         nullable=False
     )
     compensation_status: Mapped[Optional[CompensationStatus]] = mapped_column(
-        Enum(CompensationStatus),
+        Enum(CompensationStatus, values_callable=lambda x: [e.value for e in x]),
         nullable=True  # NULL если payment_source = COMPANY
     )
     
@@ -286,7 +286,7 @@ class ObjectLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     object_id: Mapped[int] = mapped_column(Integer, ForeignKey("objects.id"), nullable=False, index=True)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
-    action: Mapped[ObjectLogType] = mapped_column(Enum(ObjectLogType), nullable=False)
+    action: Mapped[ObjectLogType] = mapped_column(Enum(ObjectLogType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
