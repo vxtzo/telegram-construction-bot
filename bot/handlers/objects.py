@@ -995,7 +995,7 @@ async def show_object_card(callback: CallbackQuery, user: User, session: AsyncSe
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("object:documents:"))
+@router.callback_query(F.data.regex(r"^object:documents:\d+$"))
 async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
     parts = callback.data.split(":")
     if len(parts) < 3:
