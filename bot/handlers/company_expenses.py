@@ -287,8 +287,8 @@ async def _send_one_time_category(callback: CallbackQuery, session: AsyncSession
         )
         keyboard.row(
             InlineKeyboardButton(
-                text=f"🗑 {date_str} • {format_currency(exp.amount)}",
-                callback_data=f"company:one_time:delete:{exp.id}:{token}"
+                text=f"📄 {date_str} • {format_currency(exp.amount)}",
+                callback_data=f"company:one_time:view:{exp.id}:{token}"
             )
         )
 
@@ -332,7 +332,7 @@ async def _send_recurring_category(callback: CallbackQuery, session: AsyncSessio
         f"♻️ <b>{category}</b>",
         f"Общая сумма: {format_currency(total)}",
         "",
-        "📄 Шаблоны:",
+        "📄 Постоянные расходы:",
     ]
 
     keyboard = InlineKeyboardBuilder()
@@ -351,8 +351,8 @@ async def _send_recurring_category(callback: CallbackQuery, session: AsyncSessio
         )
         keyboard.row(
             InlineKeyboardButton(
-                text=f"🗑 {format_currency(exp.amount)} • {exp.day_of_month}-го",
-                callback_data=f"company:recurring:delete:{exp.id}:{token}"
+                text=f"📄 {format_currency(exp.amount)} • {exp.day_of_month}-го",
+                callback_data=f"company:recurring:view:{exp.id}:{token}"
             )
         )
 
@@ -664,6 +664,66 @@ async def company_one_time_category(callback: CallbackQuery, user: User, session
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("company:one_time:view:"))
+async def view_one_time_expense(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[3])
+    token = parts[4]
+    
+    try:
+        category = await _decode_token(token, session=session)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
+
+    # Получаем расход из БД
+    from database.crud import get_company_expenses_by_category
+    expenses = await get_company_expenses_by_category(session, category)
+    expense = next((e for e in expenses if e.id == expense_id), None)
+    
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    # Формируем детальную карточку
+    date_str = expense.date.strftime("%d.%m.%Y")
+    lines = [
+        f"💸 <b>Разовый расход</b>",
+        "",
+        f"📂 Категория: {category}",
+        f"📅 Дата: {date_str}",
+        f"💰 Сумма: {format_currency(expense.amount)}",
+        f"👤 Добавил: {_format_user_name(expense.user)}",
+        f"📝 Описание: {expense.description or '—'}",
+    ]
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🗑 Удалить",
+            callback_data=f"company:one_time:delete:{expense_id}:{token}"
+        )
+    )
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К списку",
+            callback_data=f"company:one_time:category:{token}"
+        )
+    )
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("company:one_time:delete:"))
 async def delete_one_time(callback: CallbackQuery, user: User, session: AsyncSession):
     if user.role != UserRole.ADMIN:
@@ -905,6 +965,73 @@ async def company_recurring_category(callback: CallbackQuery, user: User, sessio
         return
 
     await _send_recurring_category(callback, session, category)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("company:recurring:view:"))
+async def view_recurring_expense(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != UserRole.ADMIN:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    expense_id = int(parts[3])
+    token = parts[4]
+    
+    try:
+        category = await _decode_token(token, session=session, recurring=True)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
+
+    # Получаем расход из БД
+    expenses = await get_company_recurring_by_category(session, category)
+    expense = next((e for e in expenses if e.id == expense_id), None)
+    
+    if not expense:
+        await callback.answer("❌ Расход не найден", show_alert=True)
+        return
+
+    # Формируем детальную карточку
+    first_payment = _first_payment_date(expense.start_year, expense.start_month, expense.day_of_month)
+    end_label = (
+        f"до {expense.end_month:02d}.{expense.end_year}"
+        if expense.end_month and expense.end_year
+        else "бессрочно"
+    )
+    
+    lines = [
+        f"♻️ <b>Постоянный расход</b>",
+        "",
+        f"📂 Категория: {category}",
+        f"💰 Ежемесячно: {format_currency(expense.amount)}",
+        f"📅 День оплаты: {expense.day_of_month}-го числа",
+        f"📆 Дата начала: {first_payment.strftime('%d.%m.%Y')}",
+        f"⏱ Период: {end_label}",
+        f"👤 Добавил: {_format_user_name(expense.user)}",
+        f"📝 Описание: {expense.description or '—'}",
+    ]
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🗑 Удалить",
+            callback_data=f"company:recurring:delete:{expense_id}:{token}"
+        )
+    )
+    keyboard.row(
+        InlineKeyboardButton(
+            text="🔙 К списку",
+            callback_data=f"company:recurring:category:{token}"
+        )
+    )
+
+    await send_new_message(
+        callback,
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=keyboard.as_markup(),
+    )
     await callback.answer()
 
 
