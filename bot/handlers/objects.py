@@ -1196,7 +1196,7 @@ async def send_object_document(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("object:documents"))
 async def handle_unexpected_document_callback(callback: CallbackQuery):
-    logger.warning("Unhandled document callback: %s", callback.data)
+    logger.warning("Unhandled document callback: %r", callback.data)
     await callback.answer("⚠️ Не удалось обработать действие. Попробуйте ещё раз.", show_alert=True)
 
 
