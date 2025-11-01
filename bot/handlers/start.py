@@ -7,9 +7,14 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, UserRole
+from database.models import User, UserRole, ObjectStatus
 from database.crud import get_object_by_id, get_files_by_object
-from bot.handlers.objects import build_documents_menu_content, group_document_files, document_counts
+from bot.handlers.objects import (
+    build_documents_menu_content,
+    group_document_files,
+    document_counts,
+    build_objects_list_view,
+)
 from bot.keyboards.main_menu import get_main_menu
 from bot.keyboards.objects_kb import get_objects_menu
 from bot.keyboards.reports_kb import get_reports_menu
@@ -113,14 +118,20 @@ async def cmd_help(message: Message, user: User):
 
 
 @router.message(F.text == "🏗️ Объекты")
-async def menu_objects(message: Message, state: FSMContext):
+async def menu_objects(message: Message, user: User, session: AsyncSession, state: FSMContext):
     """Открыть меню объектов"""
     await state.clear()
-    await message.answer(
-        "🏗️ <b>ОБЪЕКТЫ</b>\n\nВыберите категорию:",
-        parse_mode="HTML",
-        reply_markup=get_objects_menu()
-    )
+
+    if user.role == UserRole.ADMIN:
+        await message.answer(
+            "🏗️ <b>ОБЪЕКТЫ</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_objects_menu(user.role)
+        )
+        return
+
+    text, markup = await build_objects_list_view(session, ObjectStatus.ACTIVE)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 @router.message(F.text == "📊 Создать отчёт")
@@ -152,14 +163,26 @@ async def callback_main_menu(callback: CallbackQuery, user: User, state: FSMCont
 
 
 @router.callback_query(F.data == "objects:menu")
-async def callback_objects_menu(callback: CallbackQuery, state: FSMContext):
+async def callback_objects_menu(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     """Вернуться в меню объектов"""
     await state.clear()
+
+    if user.role == UserRole.ADMIN:
+        await send_new_message(
+            callback,
+            "🏗️ <b>ОБЪЕКТЫ</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_objects_menu(user.role),
+        )
+        await callback.answer()
+        return
+
+    text, markup = await build_objects_list_view(session, ObjectStatus.ACTIVE)
     await send_new_message(
         callback,
-        "🏗️ <b>ОБЪЕКТЫ</b>\n\nВыберите категорию:",
+        text,
         parse_mode="HTML",
-        reply_markup=get_objects_menu(),
+        reply_markup=markup,
     )
     await callback.answer()
 

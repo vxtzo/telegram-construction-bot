@@ -284,6 +284,28 @@ def build_documents_menu_content(
     return "\n".join(lines), keyboard.as_markup()
 
 
+async def build_objects_list_view(
+    session: AsyncSession,
+    status: ObjectStatus,
+) -> tuple[str, InlineKeyboardMarkup]:
+    objects = await get_objects_by_status(session, status)
+    status_text = "Текущие" if status == ObjectStatus.ACTIVE else "Завершённые"
+
+    if not objects:
+        text = (
+            f"📋 <b>{status_text} объекты</b>\n\n"
+            "Нет объектов в этой категории."
+        )
+    else:
+        text = (
+            f"📋 <b>{status_text} объекты</b>\n\n"
+            f"Всего объектов: {len(objects)}\n\n"
+            "Выберите объект для просмотра:"
+        )
+
+    return text, get_objects_list_keyboard(objects, status)
+
+
 async def _send_expenses_overview(callback: CallbackQuery, session: AsyncSession, object_id: int) -> None:
     obj = await get_object_by_id(session, object_id, load_relations=False)
     if not obj:
@@ -934,7 +956,7 @@ async def _send_logs_page(
 
 
 @router.callback_query(F.data.in_(["objects:active", "objects:completed"]))
-async def show_objects_list(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def show_objects_list(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
     """
     Показать список объектов (текущих или завершенных)
     """
@@ -942,21 +964,16 @@ async def show_objects_list(callback: CallbackQuery, session: AsyncSession, stat
     
     # Определяем статус из callback_data
     status = ObjectStatus.ACTIVE if callback.data == "objects:active" else ObjectStatus.COMPLETED
-    status_text = "Текущие" if status == ObjectStatus.ACTIVE else "Завершённые"
+    if user.role != UserRole.ADMIN and status == ObjectStatus.COMPLETED:
+        await callback.answer("❌ Недостаточно прав", show_alert=True)
+        return
     
-    # Получаем объекты из БД
-    objects = await get_objects_by_status(session, status)
-    
-    if not objects:
-        text = f"📋 <b>{status_text} объекты</b>\n\nНет объектов в этой категории."
-    else:
-        text = f"📋 <b>{status_text} объекты</b>\n\nВсего объектов: {len(objects)}\n\nВыберите объект для просмотра:"
-    
+    text, markup = await build_objects_list_view(session, status)
     await send_new_message(
         callback,
         text,
         parse_mode="HTML",
-        reply_markup=get_objects_list_keyboard(objects, status),
+        reply_markup=markup,
     )
     await callback.answer()
 

@@ -7,15 +7,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database.models import ConstructionObject, ObjectStatus, UserRole
 
 
-def get_objects_menu() -> InlineKeyboardMarkup:
+def get_objects_menu(user_role: UserRole) -> InlineKeyboardMarkup:
     """Меню раздела Объекты"""
     builder = InlineKeyboardBuilder()
+
     builder.row(
         InlineKeyboardButton(text="▫️ Текущие объекты", callback_data="objects:active")
     )
-    builder.row(
-        InlineKeyboardButton(text="▫️ Завершённые объекты", callback_data="objects:completed")
-    )
+
+    if user_role == UserRole.ADMIN:
+        builder.row(
+            InlineKeyboardButton(text="▫️ Завершённые объекты", callback_data="objects:completed")
+        )
+
     builder.row(
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")
     )
