@@ -47,40 +47,44 @@ async def get_session() -> AsyncSession:
 async def init_db():
     """Инициализация базы данных - создание всех таблиц"""
     async with engine.begin() as conn:
+        # Fallback: СНАЧАЛА добавляем enum значения если их нет (до create_all)
+        try:
+            await conn.execute(sa.text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_type t 
+                        JOIN pg_enum e ON e.enumtypid = t.oid
+                        WHERE t.typname = 'filetype' AND e.enumlabel = 'estimate'
+                    ) THEN
+                        ALTER TYPE filetype ADD VALUE IF NOT EXISTS 'estimate';
+                    END IF;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END;
+                $$;
+            """))
+            
+            await conn.execute(sa.text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_type t 
+                        JOIN pg_enum e ON e.enumtypid = t.oid
+                        WHERE t.typname = 'filetype' AND e.enumlabel = 'payroll'
+                    ) THEN
+                        ALTER TYPE filetype ADD VALUE IF NOT EXISTS 'payroll';
+                    END IF;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END;
+                $$;
+            """))
+        except Exception as e:
+            print(f"⚠️ Не удалось обновить filetype enum (возможно уже существует): {e}")
+        
+        # ПОТОМ создаём таблицы
         await conn.run_sync(Base.metadata.create_all)
-        
-        # Fallback: добавляем enum значения если их нет
-        await conn.execute(sa.text("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_type t 
-                    JOIN pg_enum e ON e.enumtypid = t.oid
-                    WHERE t.typname = 'filetype' AND e.enumlabel = 'estimate'
-                ) THEN
-                    ALTER TYPE filetype ADD VALUE 'estimate';
-                END IF;
-            EXCEPTION WHEN duplicate_object THEN
-                NULL;
-            END;
-            $$;
-        """))
-        
-        await conn.execute(sa.text("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_type t 
-                    JOIN pg_enum e ON e.enumtypid = t.oid
-                    WHERE t.typname = 'filetype' AND e.enumlabel = 'payroll'
-                ) THEN
-                    ALTER TYPE filetype ADD VALUE 'payroll';
-                END IF;
-            EXCEPTION WHEN duplicate_object THEN
-                NULL;
-            END;
-            $$;
-        """))
     print("✅ База данных инициализирована")
 
 
