@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 from sqlalchemy import (
-    Integer, String, BigInteger, Boolean, DateTime, 
+    Integer, String, BigInteger, Boolean, DateTime,
     Numeric, Text, Enum, ForeignKey, UniqueConstraint, LargeBinary
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -17,38 +17,51 @@ class Base(DeclarativeBase):
     pass
 
 
-class UserRole(str, enum.Enum):
+class NormalizedStrEnum(str, enum.Enum):
+    """Enum, который принимает значения независимо от регистра."""
+
+    @classmethod
+    def _missing_(cls, value):  # type: ignore[override]
+        if isinstance(value, str):
+            normalized = value.lower()
+            for member in cls:
+                if member.value == normalized or member.name.lower() == normalized:
+                    return member
+        return None
+
+
+class UserRole(NormalizedStrEnum):
     """Роли пользователей"""
     ADMIN = "admin"
     FOREMAN = "foreman"
 
 
-class ObjectStatus(str, enum.Enum):
+class ObjectStatus(NormalizedStrEnum):
     """Статусы объектов"""
     ACTIVE = "active"
     COMPLETED = "completed"
 
 
-class ExpenseType(str, enum.Enum):
+class ExpenseType(NormalizedStrEnum):
     """Типы расходов"""
     SUPPLIES = "supplies"  # Расходники
     TRANSPORT = "transport"  # Транспортные
     OVERHEAD = "overhead"  # Накладные
 
 
-class PaymentSource(str, enum.Enum):
+class PaymentSource(NormalizedStrEnum):
     """Источник оплаты расхода"""
     COMPANY = "company"  # Оплачено фирмой
     PERSONAL = "personal"  # Оплачено прорабом (к компенсации)
 
 
-class CompensationStatus(str, enum.Enum):
+class CompensationStatus(NormalizedStrEnum):
     """Статус компенсации прорабу"""
     PENDING = "pending"  # Ожидает компенсации
     COMPENSATED = "compensated"  # Компенсировано
 
 
-class FileType(str, enum.Enum):
+class FileType(NormalizedStrEnum):
     """Типы файлов"""
     PHOTO = "photo"
     RECEIPT = "receipt"
@@ -264,7 +277,7 @@ class CompanyExpenseLog(Base):
         return f"<CompanyExpenseLog(id={self.id}, type={self.expense_type}, action={self.action})>"
 
 
-class ObjectLogType(str, enum.Enum):
+class ObjectLogType(NormalizedStrEnum):
     """Типы событий для логов объекта"""
 
     EXPENSE_CREATED = "expense_created"
