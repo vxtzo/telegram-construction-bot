@@ -38,14 +38,14 @@ class ExpenseType(str, enum.Enum):
 
 class PaymentSource(str, enum.Enum):
     """Источник оплаты расхода"""
-    COMPANY = "COMPANY"  # Оплачено фирмой
-    PERSONAL = "PERSONAL"  # Оплачено прорабом (к компенсации)
+    COMPANY = "company"  # Оплачено фирмой
+    PERSONAL = "personal"  # Оплачено прорабом (к компенсации)
 
 
 class CompensationStatus(str, enum.Enum):
     """Статус компенсации прорабу"""
-    PENDING = "PENDING"  # Ожидает компенсации
-    COMPENSATED = "COMPENSATED"  # Компенсировано
+    PENDING = "pending"  # Ожидает компенсации
+    COMPENSATED = "compensated"  # Компенсировано
 
 
 class FileType(str, enum.Enum):
