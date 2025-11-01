@@ -144,6 +144,9 @@ def _recurring_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 async def _send_one_time_overview(sender: Sender, session: AsyncSession) -> None:
+    # Получаем все разовые расходы без группировки по категориям
+    from database.crud import get_company_expenses_by_category, get_company_expense_categories
+    
     categories = await get_company_expense_categories(session)
 
     if not categories:
@@ -160,29 +163,53 @@ async def _send_one_time_overview(sender: Sender, session: AsyncSession) -> None
         )
         return
 
-    overall_total = sum(total for _, total, _ in categories)
-    overall_count = sum(count for _, _, count in categories)
+    # Собираем все расходы из всех категорий
+    all_expenses = []
+    for category, _, _ in categories:
+        expenses = await get_company_expenses_by_category(session, category)
+        all_expenses.extend(expenses)
+    
+    if not all_expenses:
+        await _reply(
+            sender,
+            "💸 <b>Разовые расходы</b>\n\nПока нет записей.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Добавить", callback_data="company:one_time:add")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="company:menu")],
+                ]
+            ),
+        )
+        return
+
+    # Сортируем по дате (новые сверху)
+    all_expenses.sort(key=lambda x: x.date, reverse=True)
+    
+    overall_total = sum(exp.amount for exp in all_expenses)
 
     lines = [
         "💸 <b>Разовые расходы</b>",
         f"Всего: {format_currency(overall_total)}",
-        f"Записей: {overall_count}",
+        f"Записей: {len(all_expenses)}",
         "",
-        "Категории:",
+        "📄 Список:",
     ]
 
     keyboard = InlineKeyboardBuilder()
 
-    for idx, (category, total, count) in enumerate(categories, start=1):
-        token = _encode_token(category)
+    for exp in all_expenses:
+        date_str = exp.date.strftime("%d.%m.%Y")
         lines.append(
-            f"\n{idx}. <b>{category}</b>\n"
-            f"   💰 {format_currency(total)} • записей: {count}"
+            f"\n• {exp.category} — {format_currency(exp.amount)}\n"
+            f"  📅 {date_str}"
         )
+        # Создаём короткий токен для callback
+        token = _encode_token(exp.category)
         keyboard.row(
             InlineKeyboardButton(
-                text=f"{category} • {format_currency(total)}",
-                callback_data=f"company:one_time:category:{token}"
+                text=f"📄 {date_str} • {exp.category} • {format_currency(exp.amount)}",
+                callback_data=f"company:one_time:view:{exp.id}:{token}"
             )
         )
 
@@ -198,12 +225,16 @@ async def _send_one_time_overview(sender: Sender, session: AsyncSession) -> None
 
 
 async def _send_recurring_overview(sender: Sender, session: AsyncSession) -> None:
+    # Получаем все активные постоянные расходы без группировки по категориям
+    from database.crud import get_company_recurring_by_category, get_company_recurring_categories
+    
+    # Сначала получим все категории, потом все расходы
     categories = await get_company_recurring_categories(session)
-
+    
     if not categories:
         await _reply(
             sender,
-            "♻️ <b>Ежемесячные расходы</b>\n\nПока нет записей.",
+            "♻️ <b>Постоянные расходы</b>\n\nПока нет записей.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -214,29 +245,50 @@ async def _send_recurring_overview(sender: Sender, session: AsyncSession) -> Non
         )
         return
 
-    overall_total = sum(total for _, total, _ in categories)
-    overall_count = sum(count for _, _, count in categories)
+    # Собираем все расходы из всех категорий
+    all_expenses = []
+    for category, _, _ in categories:
+        expenses = await get_company_recurring_by_category(session, category)
+        all_expenses.extend(expenses)
+    
+    if not all_expenses:
+        await _reply(
+            sender,
+            "♻️ <b>Постоянные расходы</b>\n\nПока нет записей.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Добавить", callback_data="company:recurring:add")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="company:menu")],
+                ]
+            ),
+        )
+        return
+
+    overall_total = sum(exp.amount for exp in all_expenses)
 
     lines = [
-        "♻️ <b>Ежемесячные расходы</b>",
+        "♻️ <b>Постоянные расходы</b>",
         f"Всего ежемесячно: {format_currency(overall_total)}",
-        f"Активных записей: {overall_count}",
+        f"Записей: {len(all_expenses)}",
         "",
-        "Категории:",
+        "📄 Список:",
     ]
 
     keyboard = InlineKeyboardBuilder()
 
-    for idx, (category, total, count) in enumerate(categories, start=1):
-        token = _encode_token(category)
+    for exp in all_expenses:
+        first_payment = _first_payment_date(exp.start_year, exp.start_month, exp.day_of_month)
         lines.append(
-            f"\n{idx}. <b>{category}</b>\n"
-            f"   💰 {format_currency(total)} • шаблонов: {count}"
+            f"\n• {exp.category} — {format_currency(exp.amount)}\n"
+            f"  📅 {exp.day_of_month}-го числа с {first_payment.strftime('%d.%m.%Y')}"
         )
+        # Создаём короткий токен для callback
+        token = _encode_token(exp.category)
         keyboard.row(
             InlineKeyboardButton(
-                text=f"{category} • {format_currency(total)}",
-                callback_data=f"company:recurring:category:{token}"
+                text=f"📄 {exp.category} • {format_currency(exp.amount)}",
+                callback_data=f"company:recurring:view:{exp.id}:{token}"
             )
         )
 
