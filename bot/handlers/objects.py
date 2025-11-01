@@ -3,6 +3,7 @@
 """
 import math
 import hashlib
+import logging
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -54,6 +55,8 @@ from bot.states.expense_states import EditExpenseStates, EditAdvanceStates
 from bot.states.object_document_states import ObjectDocumentStates
 from bot.utils.messaging import delete_message, send_new_message, get_bot_username
 from bot.services.file_service import FileService
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -1003,6 +1006,11 @@ async def show_object_documents(callback: CallbackQuery, session: AsyncSession):
         return
 
     object_id = int(parts[2])
+    logger.info(
+        "object:documents requested (object_id=%s user=%s)",
+        object_id,
+        callback.from_user.id,
+    )
     obj = await get_object_by_id(session, object_id, load_relations=False)
     if not obj:
         await callback.answer("❌ Объект не найден", show_alert=True)
@@ -1032,6 +1040,12 @@ async def list_object_documents(callback: CallbackQuery, session: AsyncSession):
 
     object_id = int(parts[3])
     token = parts[4]
+    logger.info(
+        "object:documents:list requested (object_id=%s token=%s user=%s)",
+        object_id,
+        token,
+        callback.from_user.id,
+    )
     info = _document_info(token)
     file_type = _document_file_type(token)
 
