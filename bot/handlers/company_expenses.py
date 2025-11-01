@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 import os
 import tempfile
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Union
@@ -48,6 +50,10 @@ MONTH_NAMES = [
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
+_TOKEN_CACHE: OrderedDict[str, str] = OrderedDict()
+_TOKEN_CACHE_LIMIT = 512
+_TOKEN_HASH_PREFIX = "h:"
+
 
 def _format_user_name(user: Optional[User]) -> str:
     if not user:
@@ -55,12 +61,48 @@ def _format_user_name(user: Optional[User]) -> str:
     return user.full_name or user.username or f"ID {user.telegram_id}"
 
 
-def _encode_token(value: str) -> str:
-    return quote_plus(value, safe="")
+def _encode_token(value: str, max_length: int = 28) -> str:
+    encoded = quote_plus(value, safe="")
+    if len(encoded) <= max_length:
+        return encoded
+
+    hash_length = max(6, max_length - len(_TOKEN_HASH_PREFIX))
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:hash_length]
+    token = f"{_TOKEN_HASH_PREFIX}{digest}"
+
+    _TOKEN_CACHE[token] = value
+    _TOKEN_CACHE.move_to_end(token)
+    while len(_TOKEN_CACHE) > _TOKEN_CACHE_LIMIT:
+        _TOKEN_CACHE.popitem(last=False)
+
+    return token
 
 
-def _decode_token(value: str) -> str:
-    return unquote_plus(value)
+async def _decode_token(token: str, session: AsyncSession, *, recurring: bool = False) -> str:
+    if token in _TOKEN_CACHE:
+        _TOKEN_CACHE.move_to_end(token)
+        return _TOKEN_CACHE[token]
+
+    if token.startswith(_TOKEN_HASH_PREFIX):
+        digest = token[len(_TOKEN_HASH_PREFIX):]
+        categories_source = (
+            await get_company_recurring_categories(session)
+            if recurring
+            else await get_company_expense_categories(session)
+        )
+
+        for category_name, *_ in categories_source:
+            candidate = hashlib.sha1(category_name.encode("utf-8")).hexdigest()[: len(digest)]
+            if candidate == digest:
+                _TOKEN_CACHE[token] = category_name
+                _TOKEN_CACHE.move_to_end(token)
+                while len(_TOKEN_CACHE) > _TOKEN_CACHE_LIMIT:
+                    _TOKEN_CACHE.popitem(last=False)
+                return category_name
+
+        raise ValueError("Категория не найдена для токена")
+
+    return unquote_plus(token)
 
 
 async def _reply(sender: Sender, text: str, **kwargs) -> None:
@@ -611,7 +653,13 @@ async def company_one_time_category(callback: CallbackQuery, user: User, session
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
 
-    category = _decode_token(callback.data.split(":")[-1])
+    token = callback.data.split(":")[-1]
+    try:
+        category = await _decode_token(token, session=session)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
+
     await _send_one_time_category(callback, session, category)
     await callback.answer()
 
@@ -625,7 +673,11 @@ async def delete_one_time(callback: CallbackQuery, user: User, session: AsyncSes
     parts = callback.data.split(":")
     expense_id = int(parts[3])
     token = parts[4]
-    category = _decode_token(token)
+    try:
+        category = await _decode_token(token, session=session)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
 
     success = await delete_company_expense(session, expense_id)
     if not success:
@@ -845,7 +897,13 @@ async def company_recurring_category(callback: CallbackQuery, user: User, sessio
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
 
-    category = _decode_token(callback.data.split(":")[-1])
+    token = callback.data.split(":")[-1]
+    try:
+        category = await _decode_token(token, session=session, recurring=True)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
+
     await _send_recurring_category(callback, session, category)
     await callback.answer()
 
@@ -859,7 +917,11 @@ async def delete_recurring(callback: CallbackQuery, user: User, session: AsyncSe
     parts = callback.data.split(":")
     expense_id = int(parts[3])
     token = parts[4]
-    category = _decode_token(token)
+    try:
+        category = await _decode_token(token, session=session, recurring=True)
+    except ValueError:
+        await callback.answer("❌ Не удалось определить категорию. Обновите список.", show_alert=True)
+        return
 
     success = await delete_company_recurring_expense(session, expense_id)
     if not success:

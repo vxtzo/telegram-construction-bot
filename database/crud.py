@@ -5,7 +5,7 @@ from typing import Optional, List
 from datetime import datetime
 from decimal import Decimal
 import logging
-from sqlalchemy import select, update, delete, and_, or_, func, text, inspect
+from sqlalchemy import select, update, delete, and_, or_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import ProgrammingError
@@ -567,6 +567,8 @@ async def create_company_recurring_expense(
     end_month: Optional[int] = None,
     end_year: Optional[int] = None,
 ) -> CompanyRecurringExpense:
+    await _ensure_company_recurring_schema(session)
+
     expense = CompanyRecurringExpense(
         category=category.strip(),
         amount=amount,
@@ -623,14 +625,23 @@ async def get_company_expenses_by_category(session: AsyncSession, category: str)
 
 
 async def _ensure_company_recurring_schema(session: AsyncSession) -> None:
-    def _get_columns(sync_connection) -> set[str]:
-        inspector = inspect(sync_connection)
-        if not inspector.has_table('company_recurring_expenses'):
-            return set()
-        return {col['name'] for col in inspector.get_columns('company_recurring_expenses')}
+    schema_query = text("SELECT current_schema()")
 
     try:
-        columns = await session.run_sync(_get_columns)
+        schema_result = await session.execute(schema_query)
+        current_schema = schema_result.scalar() or "public"
+
+        columns_result = await session.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = :schema AND table_name = :table
+                """
+            ),
+            {"schema": current_schema, "table": "company_recurring_expenses"},
+        )
+        columns = {row[0] for row in columns_result.all()}
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to inspect company_recurring_expenses: %s", exc)
         return
@@ -640,34 +651,34 @@ async def _ensure_company_recurring_schema(session: AsyncSession) -> None:
 
     statements: list[str] = []
 
-    if 'period_month' in columns and 'start_month' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses RENAME COLUMN period_month TO start_month')
-        columns.remove('period_month')
-        columns.add('start_month')
+    if "period_month" in columns and "start_month" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses RENAME COLUMN period_month TO start_month")
+        columns.discard("period_month")
+        columns.add("start_month")
 
-    if 'period_year' in columns and 'start_year' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses RENAME COLUMN period_year TO start_year')
-        columns.remove('period_year')
-        columns.add('start_year')
+    if "period_year" in columns and "start_year" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses RENAME COLUMN period_year TO start_year")
+        columns.discard("period_year")
+        columns.add("start_year")
 
-    if 'day_of_month' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN day_of_month INTEGER NOT NULL DEFAULT 1')
-        statements.append('ALTER TABLE company_recurring_expenses ALTER COLUMN day_of_month DROP DEFAULT')
-        columns.add('day_of_month')
+    if "day_of_month" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses ADD COLUMN day_of_month INTEGER NOT NULL DEFAULT 1")
+        statements.append("ALTER TABLE company_recurring_expenses ALTER COLUMN day_of_month DROP DEFAULT")
+        columns.add("day_of_month")
 
-    if 'end_month' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN end_month INTEGER NULL')
-        columns.add('end_month')
+    if "end_month" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses ADD COLUMN end_month INTEGER NULL")
+        columns.add("end_month")
 
-    if 'end_year' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN end_year INTEGER NULL')
-        columns.add('end_year')
+    if "end_year" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses ADD COLUMN end_year INTEGER NULL")
+        columns.add("end_year")
 
-    if 'is_active' not in columns:
-        statements.append('ALTER TABLE company_recurring_expenses ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE')
-        statements.append('UPDATE company_recurring_expenses SET is_active = TRUE WHERE is_active IS NULL')
-        statements.append('ALTER TABLE company_recurring_expenses ALTER COLUMN is_active DROP DEFAULT')
-        columns.add('is_active')
+    if "is_active" not in columns:
+        statements.append("ALTER TABLE company_recurring_expenses ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE")
+        statements.append("UPDATE company_recurring_expenses SET is_active = TRUE WHERE is_active IS NULL")
+        statements.append("ALTER TABLE company_recurring_expenses ALTER COLUMN is_active DROP DEFAULT")
+        columns.add("is_active")
 
     if statements:
         for stmt in statements:
